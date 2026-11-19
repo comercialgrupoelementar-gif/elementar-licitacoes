@@ -192,7 +192,7 @@ async function openTeam() {
 }
 
 function renderClients(view) {
-  const section = panel(view,'<h2>Mestre Gerenciador</h2><p>Empresas clientes e respectivos espaços de trabalho.</p>');
+  const section = panel(view,'<h2>Mestre Gerenciador</h2><p>Cadastre empresas clientes e defina o administrador de cada espaço.</p>');
   action('Cadastrar empresa cliente', () => edit('Nova empresa cliente', [
     ['nome_cliente','Nome da empresa','text'],['email_admin','E-mail do administrador cadastrado','email']
   ], async values => {
@@ -229,7 +229,15 @@ function render() {
   const view = byId('view');
   const account = byId('account');
   for (const node of [nav,view,account]) node.replaceChildren();
-  byId('connection').textContent = client ? 'Ambiente conectado ao Supabase' : 'Modo demonstração · dados salvos somente neste navegador';
+  const platformView = master && page === 'clientes';
+  const customer = groups.find(entry => entry.id === group);
+  byId('page-title').textContent = platformView ? 'Administração da plataforma'
+    : session || !client ? (page === 'equipe' ? 'Minha equipe' : screens[page] ?? 'Painel geral')
+    : 'Acesso ao sistema';
+  byId('connection').textContent = !client ? 'Modo demonstração · dados salvos somente neste navegador'
+    : platformView ? 'E-Lementar · desenvolvedora da plataforma'
+    : customer ? 'Área da empresa · ' + customer.nome
+    : session ? 'Área da empresa' : 'Gestão de licitações e compras governamentais';
   if (client && !session) {
     action('Entrar', () => edit('Acessar sua conta', [['email','E-mail','email'],['password','Senha','password']], async values => {
       const {data,error} = await client.auth.signInWithPassword(values);
@@ -254,7 +262,7 @@ function render() {
     }
     if (groupRole() === 'admin') action('Minha equipe',openTeam,nav).setAttribute('aria-current',String(page==='equipe'));
     const select = document.createElement('select');
-    select.setAttribute('aria-label','Grupo empresarial');
+    select.setAttribute('aria-label','Empresa cliente');
     groups.forEach(g => select.add(new Option(g.nome,g.id)));
     select.value = group;
     select.onchange = async () => {
