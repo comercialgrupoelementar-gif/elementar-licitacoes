@@ -11,12 +11,16 @@ const message = text => { byId('notice').textContent = text; };
 const tables = ['empresas','editais','itens','documentos'];
 const db = Object.fromEntries(tables.map(table => [table,[]]));
 const localKey = 'elementar-licitacoes-demo-v1';
-const screens = {painel:'Painel geral',editais:'Captação',empresas:'Empresas e CNPJs'};
+const screens = {painel:'Painel geral',editais:'Captação',empresas:'Empresas e CNPJs',propostas:'Propostas',documentacao:'Documentação'};
 let page = 'painel';
 let activeEdital;
 let group;
 let session;
 let groups = [];
+let master = false;
+let clients = [];
+let team = [];
+let detailMode = null;
 
 function action(label, run, parent, primary = false) {
   const button = document.createElement('button');
@@ -54,7 +58,7 @@ function edit(title, fields, save) {
   const controls = document.createElement('div');
   controls.className = 'line';
   const submit = document.createElement('button');
-  submit.textContent = 'Salvar';
+  submit.textContent = title === 'Acessar sua conta' ? 'Entrar' : 'Salvar';
   submit.type = 'submit';
   submit.className = 'primary';
   controls.append(submit);
@@ -107,7 +111,8 @@ async function save(table, values, id) {
   await load();
 }
 
-const canWrite = () => !client || groups.find(item => item.id === group)?.role !== 'leitor';
+const groupRole = () => groups.find(item => item.id === group)?.role;
+const canWrite = () => !client || ['admin','operador'].includes(groupRole());
 const writeAction = (label,run,parent,primary) => { if (canWrite()) action(label,run,parent,primary); };
 
 function company() {
@@ -170,6 +175,55 @@ const panel = (container, html) => {
   return section;
 };
 
+async function call(name, args) {
+  const {data,error} = await client.rpc(name,args);
+  if (error) throw new Error(error.message);
+  return data;
+}
+
+async function openClients() {
+  clients = await call('licitacoes_clientes');
+  page = 'clientes'; activeEdital = null; render();
+}
+
+async function openTeam() {
+  team = await call('licitacoes_equipe',{cliente:group});
+  page = 'equipe'; activeEdital = null; render();
+}
+
+function renderClients(view) {
+  const section = panel(view,'<h2>Mestre Gerenciador</h2><p>Empresas clientes e respectivos espaços de trabalho.</p>');
+  action('Cadastrar empresa cliente', () => edit('Nova empresa cliente', [
+    ['nome_cliente','Nome da empresa','text'],['email_admin','E-mail do administrador cadastrado','email']
+  ], async values => {
+    await call('licitacoes_criar_cliente',values);
+    clients = await call('licitacoes_clientes');
+  }), section,true);
+  for (const customer of clients) panel(section,'<strong>'+escape(customer.nome)+'</strong><p>'+escape(customer.integrantes)+' integrante(s)</p>');
+}
+
+function renderTeam(view) {
+  const section = panel(view,'<h2>Equipe da empresa</h2><p>Gerencie o acesso ao seu espaço de trabalho.</p>');
+  action('Adicionar integrante', () => edit('Adicionar integrante',[
+    ['email_membro','E-mail do usuário cadastrado','email'],
+    ['papel_membro','Perfil','select','operador',[['operador','Operador'],['leitor','Leitor']]]
+  ], async values => {
+    await call('licitacoes_adicionar_membro',{...values,cliente:group});
+    team = await call('licitacoes_equipe',{cliente:group});
+  }),section,true);
+  for (const member of team) panel(section,'<strong>'+escape(member.email)+'</strong><p>'+escape(member.papel)+'</p>');
+}
+
+function renderEditalIndex(view, docs) {
+  const section = panel(view,docs ? '<h2>Documentação por edital</h2>' : '<h2>Propostas por edital</h2>');
+  const rows = db.editais.filter(row => row.status === 'Aprovado' || db.itens.some(item => item.edital_id === row.id) || (docs && db.documentos.some(doc => doc.edital_id === row.id)));
+  if (!rows.length) section.append(Object.assign(document.createElement('p'),{textContent:'Nenhum edital disponível. Aprove uma oportunidade na Captação.'}));
+  for (const row of rows) {
+    const card = panel(section,'<strong>'+escape(row.numero)+'</strong><p>'+escape(row.orgao)+'</p>');
+    action(docs?'Abrir checklist':'Abrir proposta',()=>{detailMode=docs?'docs':'proposal';activeEdital=row.id;render();},card);
+  }
+}
+
 function render() {
   const nav = byId('nav');
   const view = byId('view');
@@ -190,16 +244,22 @@ function render() {
     action('Sair', async () => {
       const {error} = await client.auth.signOut();
       if (error) throw error;
-      session = null; group = null; await load(); render();
+      session = null; group = null; master = false; groups = []; clients = []; team = []; page = 'painel'; activeEdital = null; await load(); render();
     },account);
-    if (!groups.length) { panel(view,'<p>Seu usuário ainda está sem vínculo com um grupo.</p>'); return; }
+    if (master) action('Mestre Gerenciador',openClients,nav).setAttribute('aria-current',String(page==='clientes'));
+    if (!groups.length) {
+      if (page === 'clientes' && master) renderClients(view);
+      else panel(view,'<p>Seu usuário ainda está sem vínculo com uma empresa.</p>');
+      return;
+    }
+    if (groupRole() === 'admin') action('Minha equipe',openTeam,nav).setAttribute('aria-current',String(page==='equipe'));
     const select = document.createElement('select');
     select.setAttribute('aria-label','Grupo empresarial');
     groups.forEach(g => select.add(new Option(g.nome,g.id)));
     select.value = group;
     select.onchange = async () => {
       const previous = group;
-      group = select.value; activeEdital = null;
+      group = select.value; activeEdital = null; page = 'painel';
       try { await load(); render(); }
       catch(error) { group = previous; select.value = previous; message(error.message); }
     };
@@ -208,7 +268,10 @@ function render() {
   for (const [key,label] of Object.entries(screens)) {
     action(label,() => {page=key;activeEdital=null;message('');render();},nav).setAttribute('aria-current',String(key===page));
   }
+  if (page === 'clientes' && master) { renderClients(view); return; }
+  if (page === 'equipe' && groupRole() === 'admin') { renderTeam(view); return; }
   if (activeEdital) { renderProposal(view,db.editais.find(x => x.id === activeEdital)); return; }
+  if (page === 'propostas' || page === 'documentacao') { renderEditalIndex(view,page==='documentacao'); return; }
   if (page === 'painel') {
     const grid = document.createElement('div');
     grid.className = 'grid';
@@ -233,7 +296,7 @@ function render() {
         const card = panel(lane,'<strong>'+escape(row.numero)+'</strong><p>'+escape(row.orgao)+'</p><p class="muted">'+escape(row.modalidade)+'</p>');
         card.classList.add('card');
         writeAction('Analisar',()=>edital(row),card);
-        if (row.status==='Aprovado' || db.itens.some(x=>x.edital_id===row.id)) action('Abrir proposta',()=>{activeEdital=row.id;render();},card,true);
+        if (row.status==='Aprovado' || db.itens.some(x=>x.edital_id===row.id)) action('Abrir proposta',()=>{detailMode=null;activeEdital=row.id;render();},card,true);
       }
     }
   }
@@ -254,6 +317,8 @@ function renderProposal(view,row) {
     const controls=tr.insertCell();
     if(row.status==='Aprovado') writeAction('Editar',()=>item(row,entry),controls);
   }
+  if (detailMode === 'docs') section.remove();
+  if (detailMode === 'proposal') return;
   const checklist=panel(view,'<h2>Checklist documental</h2>');
   writeAction('Adicionar requisito',()=>documentEditor(row),checklist,true);
   for(const doc of docs){
@@ -266,6 +331,9 @@ async function loadGroups(){
   const {data,error}=await client.from('membros').select('papel,grupos(id,nome)');
   if(error) throw error;
   groups=data.map(m=>({...m.grupos,role:m.papel}));
+  const capability = await client.rpc('licitacoes_eh_mestre');
+  if (capability.error && capability.error.code !== 'PGRST202') throw capability.error;
+  master = capability.data === true;
   group=groups[0]?.id;
   await load();
 }
