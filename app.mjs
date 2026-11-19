@@ -1,3 +1,4 @@
+import {normalizeDocument, validDocument} from './documentos.mjs';
 import {supabaseUrl, supabasePublishableKey} from './config.mjs';
 
 const client = supabaseUrl && supabasePublishableKey
@@ -120,8 +121,8 @@ function company() {
     ['nome','Razão social','text'],['cnpj','CNPJ completo','text'],
     ['porte','Enquadramento informado','select','MEI',['MEI','MEI Caminhoneiro','ME','EPP','Demais']]
   ], values => {
-    values.cnpj = values.cnpj.toUpperCase().replace(/[./\s-]/g,'');
-    if (!/^[A-Z0-9]{12}[0-9]{2}$/.test(values.cnpj)) throw new Error('Informe um CNPJ com 14 caracteres.');
+    values.cnpj = normalizeDocument(values.cnpj);
+    if (values.cnpj.length !== 14 || !validDocument(values.cnpj)) throw new Error('Informe um CNPJ válido, incluindo os dois dígitos verificadores.');
     if (db.empresas.some(row => row.cnpj === values.cnpj)) throw new Error('CNPJ já cadastrado neste grupo.');
     return save('empresas',values);
   });
@@ -239,13 +240,30 @@ function render() {
     : customer ? 'Área da empresa · ' + customer.nome
     : session ? 'Área da empresa' : 'Gestão de licitações e compras governamentais';
   if (client && !session) {
-    action('Entrar', () => edit('Acessar sua conta', [['email','E-mail','email'],['password','Senha','password']], async values => {
-      const {data,error} = await client.auth.signInWithPassword(values);
-      if (error) throw error;
-      session = data.session;
-      await loadGroups();
-    }), account,true);
-    panel(view,'<p>Entre com uma conta autorizada para acessar as licitações da sua empresa.</p>');
+    const access = document.createElement('div');
+    access.className = 'auth-layout';
+    access.innerHTML = '<section class="auth-intro"><strong>E-Lementar Licitações</strong><h2>Da oportunidade à entrega.</h2><p>Organize editais, propostas e fornecimentos ao poder público.</p></section><section class="auth-access"><h2>Acesse sua empresa</h2><form id="login-form"><label>E-mail<input name="email" type="email" autocomplete="username" required></label><label>Senha<input name="password" type="password" autocomplete="current-password" required></label><button type="submit" class="primary">Entrar</button><p role="alert"></p></form></section>';
+    view.append(access);
+    const form = byId('login-form');
+    form.onsubmit = async event => {
+      event.preventDefault();
+      const button = event.submitter;
+      const errorBox = form.querySelector('[role=alert]');
+      button.disabled = true;
+      errorBox.textContent = '';
+      try {
+        const credentials = Object.fromEntries(new FormData(form));
+        const {data,error} = await client.auth.signInWithPassword(credentials);
+        if (error) throw error;
+        session = data.session;
+        form.reset();
+        try { await loadGroups(); }
+        catch (loadError) { message(loadError.message); }
+        render();
+      } catch (error) {
+        errorBox.textContent = error.message === 'Invalid login credentials' ? 'E-mail ou senha incorretos.' : error.message;
+      } finally { button.disabled = false; }
+    };
     return;
   }
   if (client) {
@@ -281,8 +299,13 @@ function render() {
   if (activeEdital) { renderProposal(view,db.editais.find(x => x.id === activeEdital)); return; }
   if (page === 'propostas' || page === 'documentacao') { renderEditalIndex(view,page==='documentacao'); return; }
   if (page === 'painel') {
+    const hero = document.createElement('section');
+    hero.className = 'hero';
+    hero.innerHTML = '<div><h2>Da captação à proposta</h2><p>Acompanhe oportunidades, prazos e valores da sua empresa.</p></div>';
+    writeAction('Nova oportunidade', () => edital(), hero, true);
+    view.append(hero);
     const grid = document.createElement('div');
-    grid.className = 'grid';
+    grid.className = 'grid dashboard-metrics';
     view.append(grid);
     for (const [label,value] of [['Oportunidades',db.editais.length],['Aprovadas',db.editais.filter(x=>x.status==='Aprovado').length],['CNPJs',db.empresas.length],['Valor em propostas',money.format(total(db.itens))]]) panel(grid,escape(label)+'<span class="stat">'+escape(value)+'</span>');
   } else if (page === 'empresas') {
