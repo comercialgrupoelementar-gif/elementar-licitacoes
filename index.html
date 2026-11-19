@@ -12,22 +12,87 @@ h1,h2,h3{font-family:Manrope,sans-serif}h1{font-size:clamp(1.4rem,3vw,2rem);marg
 .auth-layout{min-height:100vh;display:grid;grid-template-columns:1.1fr 1fr;background:#fff}.auth-intro,.auth-access{display:grid;align-content:center;padding:clamp(24px,6vw,90px)}.auth-intro{background:#101519;color:#fff}.auth-intro strong{color:var(--accent)}.auth-intro h2{font-size:clamp(1.8rem,4vw,3.5rem);margin:16px 0}.auth-intro p{color:#c5cdd6}.auth-access form{width:100%;max-width:420px}
 .hero{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:16px;background:var(--ink);color:#fff;border-radius:15px;padding:26px;margin-bottom:20px}.hero h2{margin:0 0 6px}.hero p{margin:0;color:#c5cdd6}.hero button{background:var(--accent);border-color:var(--accent);color:#241e15}.dashboard-metrics{margin:18px 0}
 @media(max-width:720px){.shell{grid-template-columns:minmax(0,1fr)}.sidebar{position:static;height:auto;padding:14px;gap:10px}.sidebar nav{display:flex;overflow-x:auto}.sidebar button{flex:none;width:auto;white-space:nowrap}.sidebar select{max-width:180px}.sidebar footer,.sidebar h2{display:none}.auth-layout{grid-template-columns:1fr;min-height:0}.auth-access{padding-top:24px;padding-bottom:36px}}
+.brand-space{padding:2px 12px 26px}
+.workspace-tag{font-size:9px;letter-spacing:2.6px;color:#c3b28f;display:block;margin-top:14px}
+.nav-caption{font-size:8px;letter-spacing:1.6px;color:#888a80;margin:4px 14px 15px}
+.sidebar-foot{margin:auto 12px 0;padding-top:28px;color:#bcbdb5;font-size:10px}
+.sidebar-foot .muted{font-size:9px;margin-top:8px;color:#777b70}
+.status-dot{display:inline-block;background:#a9bf87;width:5px;height:5px;border-radius:50%;margin-right:6px}
+.topbar{height:84px;padding:20px 40px;background:#fff;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center}
+.breadcrumb{display:flex;gap:15px;align-items:center;font-size:11px;color:#aaa99f}
+.breadcrumb strong{color:#6d6f64;font-weight:500}
+.account{display:flex;align-items:center;gap:10px}
+.account strong{font-size:10px;display:block}
+.account small{display:block;color:var(--muted);font-size:8px;margin-top:4px}
+.avatar{display:grid;place-items:center;background:#eee8dc;color:#85734c;font-weight:700;width:32px;height:32px;border-radius:50%;font-size:10px}
+.content{max-width:1600px;padding:32px 40px}
+.pagehead h1{font:700 clamp(22px,2.1vw,30px)/1.3 Manrope,sans-serif;letter-spacing:-1px;margin:7px 0}
+.pagehead p{font-size:11px;color:var(--muted);margin:9px 0 0}
+.eyebrow{font-size:9px;letter-spacing:1.7px}
+.overview-banner{padding:34px 38px;border-radius:14px;background:linear-gradient(115deg,#19282c,#394646);color:#fff;display:flex;justify-content:space-between;gap:30px;position:relative;overflow:hidden;margin-bottom:24px}
+.overview-banner:after{content:'';width:330px;height:330px;border:1px solid #d5bb8315;border-radius:50%;position:absolute;right:110px;top:-140px;box-shadow:0 0 0 35px #d5bb8306,0 0 0 70px #d5bb8305;pointer-events:none}
+.overview-banner .eyebrow{color:#d8c398}
+.overview-banner h2{font:600 clamp(25px,2.6vw,37px)/1.22 Manrope;letter-spacing:-1px;margin:15px 0}
+.overview-banner p{font-size:11px;line-height:1.7;color:#c6cbbd;max-width:370px}
+.hero-buttons{display:flex;gap:10px;margin-top:22px}
+.hero-buttons button{font-size:10px;padding:11px 16px}
+.banner-side{border-left:1px solid #ffffff20;padding-left:38px;min-width:200px;align-self:center;z-index:1}
+.metric{background:white;border:1px solid var(--line);border-radius:11px;padding:20px}
+.metric>div{display:flex;justify-content:space-between;align-items:center}
+.metric span{font-size:10px;color:#85867b}
+.metric-icon{background:#f5f3ed;border-radius:7px;padding:7px;display:flex}
+.metric-icon .icon{width:15px;height:15px;color:#8b825f}
+.metric strong{display:block;font:700 clamp(20px,2vw,28px) Manrope;letter-spacing:-1px;margin:12px 0 7px}
+.metric small{font-size:9px;color:#a2a395}
+:root{background:#f5f5f1;--line:#e7e4dd;--muted:#797d77;--ink:#262d31}
+.shell{grid-template-columns:236px minmax(0,1fr)}
+.sidebar{padding:32px 14px 26px;gap:0;background:#101519}
+.brand-space{padding:20px 12px 23px}
+.sidebar .wordmark{font:500 34px Georgia,serif;letter-spacing:-1.8px;white-space:nowrap}
+.sidebar .wordmark small{font-size:10px;letter-spacing:3px;margin:5px 0 21px}
+.nav-caption{margin:0 14px 14px}
+.sidebar nav{gap:5px;scrollbar-width:thin;scrollbar-color:#75838a transparent}
+.sidebar nav button{display:flex;align-items:center;gap:12px;font-size:12px;padding:10px 13px;min-height:39px}
+.sidebar nav button[aria-current=true]{background:#d5bb8320;color:#efcb8e}
+.sidebar select{width:calc(100% - 12px);margin:8px 6px;background:#20282b;color:#e7e9e5;border-color:#434b4d;font-size:11px}
+.sidebar .sidebar-foot{border-top:1px solid #ffffff12;padding-top:16px}
+#account .signout{display:grid;place-items:center;padding:9px;background:transparent;border-color:transparent;color:#727771}
+#account .signout:hover{border-color:var(--line)}
+.icon{width:17px;height:17px;flex:none;vertical-align:middle}
+.pagehead{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:28px}
+.pagehead button{flex:none}
+.eyebrow{font-weight:700;color:#7e8178}
+button.primary{background:#34372e;border-color:#34372e}
+.primary .icon{margin-right:9px}
+.overview-banner{min-height:307px}
+.overview-banner h2{max-width:460px}
+.overview-banner .hero-buttons .accent{background:#ddab63;border-color:#ddab63;color:#221d15}
+.overview-banner .hero-buttons .outline-light{color:#fff;background:transparent;border-color:#ffffff40}
+.hero-buttons .icon{margin-left:8px;width:14px}
+.banner-side{min-width:220px;display:grid;gap:12px}
+.banner-side div{display:flex;align-items:center;justify-content:space-between;gap:20px;font-size:11px;color:#dddac8}
+.banner-side strong{font:500 26px Manrope;color:#f2e6cb}
+.overview-metrics{grid-template-columns:repeat(3,minmax(0,1fr));gap:16px}
+.metric:first-child{border-color:#b7c6a5;background:#f7faf3}
+.metric:nth-child(2){border-color:#ddc4a5;background:#faf8f2}
+@media(max-width:900px){.content,.topbar{padding-inline:22px}.overview-banner{padding:28px}.banner-side{padding-left:20px;min-width:155px}}
+@media(max-width:720px){.shell{grid-template-columns:minmax(0,1fr)}.sidebar{padding:12px 14px}.brand-space{padding:4px 0 10px}.sidebar .wordmark{font-size:22px}.sidebar .wordmark small,.workspace-tag{display:none}.sidebar nav button{padding:7px 10px}.topbar{height:58px}.pagehead{align-items:flex-start;flex-wrap:wrap}.overview-banner{flex-direction:column;min-height:0}.banner-side{border-left:0;border-top:1px solid #ffffff20;padding:14px 0 0;align-self:stretch}.overview-metrics{grid-template-columns:1fr}}
 </style>
 <script defer src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<script type="module" src="./app.mjs?v=20261119-2"></script>
+<script type="module" src="./app.mjs?v=20261119-3"></script>
 </head>
 <body>
 <div class="shell">
   <aside class="sidebar" aria-label="Central de telas">
-    <strong>E-Lementar<small>LICITAÇÕES</small></strong>
-    <h2>Seu espaço de trabalho</h2>
+    <div class="brand-space"><strong class="wordmark">E-Lementar<small>LICITAÇÕES</small></strong><span class="workspace-tag">GESTÃO INTEGRADA</span></div>
+    <h2 class="nav-caption">SEU ESPAÇO DE TRABALHO</h2>
     <nav id="nav" aria-label="Módulos"></nav>
-    <footer>Desenvolvido pela E-Lementar</footer>
+    <footer class="sidebar-foot"><span class="status-dot"></span> E-Lementar Licitações<div class="muted">Da oportunidade à entrega.</div></footer>
   </aside>
   <div class="workspace">
-    <header class="topbar"><strong>E-Lementar Licitações</strong><div id="account"></div></header>
+    <header class="topbar"><div class="breadcrumb"><span>E-Lementar</span><span aria-hidden="true">/</span><strong id="breadcrumb-label"></strong></div><div id="account" class="account"></div></header>
     <main class="content">
-      <div class="pagehead"><h1 id="page-title">Acesso ao sistema</h1><p id="connection" class="muted"></p></div>
+      <div class="pagehead"><div><div id="workspace-name" class="eyebrow"></div><h1 id="page-title">Acesso ao sistema</h1><p id="connection" class="muted"></p></div><div id="page-actions"></div></div>
       <div id="notice" role="status"></div>
       <section id="view"></section>
     </main>

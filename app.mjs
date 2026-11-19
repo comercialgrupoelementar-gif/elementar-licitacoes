@@ -12,7 +12,7 @@ const message = text => { byId('notice').textContent = text; };
 const tables = ['empresas','editais','itens','documentos'];
 const db = Object.fromEntries(tables.map(table => [table,[]]));
 const localKey = 'elementar-licitacoes-demo-v1';
-const screens = {painel:'Painel geral',editais:'Captação',empresas:'Empresas e CNPJs',propostas:'Propostas',documentacao:'Documentação'};
+const screens = {painel:'Visão geral',editais:'Captação',empresas:'Empresas e CNPJs',propostas:'Propostas',documentacao:'Documentação'};
 let page = 'painel';
 let activeEdital;
 let group;
@@ -225,11 +225,67 @@ function renderEditalIndex(view, docs) {
   }
 }
 
+const iconPaths = {
+  painel:'M3 10l9-7 9 7v10h-6v-6H9v6H3z', editais:'M3 4h18v16H3z M9 4v12 M15 4v9',
+  propostas:'M5 3h10l4 4v14H5z M8 12h8 M8 16h8',
+  documentacao:'M3 7h7l2 2h9v11H3z M9 14l2 2 4-4',
+  empresas:'M3 21V9l9-6 9 6v12 M8 21v-7h8v7',
+  equipe:'M3 21v-2a4 4 0 014-4h4a4 4 0 014 4v2 M16 15a4 4 0 014 4v2 M9 11a4 4 0 100-8 4 4 0 000 8z',
+  clientes:'M12 22s8-4 8-12V5l-8-3-8 3v5c0 8 8 12 8 12z',
+  sair:'M10 4H4v16h6 M8 12h13 M17 8l4 4-4 4',
+  plus:'M12 5v14 M5 12h14', arrow:'M4 12h16 M15 7l5 5-5 5'
+};
+function icon(name) {
+  return `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${iconPaths[name]}"/></svg>`;
+}
+function goTo(key) {
+  page = key;
+  activeEdital = null;
+  message('');
+  render();
+}
+function navAction(key,label,run,parent) {
+  const button = action(label,run,parent);
+  button.insertAdjacentHTML('afterbegin',icon(key));
+  button.setAttribute('aria-current',String(key === page));
+}
+function renderOverview(view) {
+  const editais = db.editais;
+  const count = status => editais.filter(row => row.status === status).length;
+  const publishedProposals = new Set(db.itens.map(item => item.edital_id)).size;
+  const overview = document.createElement('section');
+  overview.className = 'overview-banner';
+  overview.innerHTML = `<div><span class="eyebrow">OPERAÇÃO DE LICITAÇÕES</span>
+    <h2>Editais e propostas,<br>na mesma direção.</h2>
+    <p>Acompanhe oportunidades, organize a documentação e prepare suas propostas.</p>
+    <div class="hero-buttons"></div></div>
+    <div class="banner-side">${[
+      ['Editais captados',count('Captado')],['Editais em análise',count('Em análise')],
+      ['Editais aprovados',count('Aprovado')],['Propostas com itens',publishedProposals]
+    ].map(([label,value])=>`<div><span>${label}</span><strong>${value}</strong></div>`).join('')}</div>`;
+  const controls = overview.querySelector('.hero-buttons');
+  const board = action('Abrir quadro de captação',()=>goTo('editais'),controls);
+  board.className = 'accent';
+  board.insertAdjacentHTML('beforeend',icon('arrow'));
+  action('Ver propostas',()=>goTo('propostas'),controls).className = 'outline-light';
+  view.append(overview);
+  const grid = document.createElement('section');
+  grid.className = 'grid overview-metrics';
+  for (const [label,value,detail,symbol] of [
+    ['Oportunidades cadastradas',editais.length,'Todos os editais da empresa','editais'],
+    ['Valor em propostas',money.format(total(db.itens)),'Soma dos itens cadastrados','propostas'],
+    ['CNPJs cadastrados',db.empresas.length,'Empresas e estabelecimentos','empresas']
+  ]) {
+    grid.insertAdjacentHTML('beforeend',`<div class="metric"><div><span>${label}</span><span class="metric-icon">${icon(symbol)}</span></div><strong>${escape(value)}</strong><small>${detail}</small></div>`);
+  }
+  view.append(grid);
+}
+
 function render() {
   const nav = byId('nav');
   const view = byId('view');
   const account = byId('account');
-  for (const node of [nav,view,account]) node.replaceChildren();
+  for (const node of [nav,view,account,byId("page-actions")]) node.replaceChildren();
   const platformView = master && page === 'clientes';
   const customer = groups.find(entry => entry.id === group);
   byId('page-title').textContent = platformView ? 'Administração da plataforma'
@@ -239,6 +295,13 @@ function render() {
     : platformView ? 'E-Lementar · desenvolvedora da plataforma'
     : customer ? 'Área da empresa · ' + customer.nome
     : session ? 'Área da empresa' : 'Gestão de licitações e compras governamentais';
+  byId('breadcrumb-label').textContent = byId('page-title').textContent;
+  byId('workspace-name').textContent = customer?.nome?.toLocaleUpperCase('pt-BR') || 'E-LEMENTAR LICITAÇÕES';
+  if (page === 'painel' && (!client || group)) {
+    byId('page-title').textContent = 'Clareza para decidir. Controle para crescer.';
+    if (client) byId('connection').textContent = 'Sua empresa em movimento, da captação à entrega.';
+    if (canWrite()) action('Nova oportunidade',()=>edital(),byId('page-actions'),true).insertAdjacentHTML('afterbegin',icon('plus'));
+  }
   if (client && !session) {
     const access = document.createElement('div');
     access.className = 'auth-layout';
@@ -267,18 +330,25 @@ function render() {
     return;
   }
   if (client) {
-    action('Sair', async () => {
+    const user = session.user.user_metadata?.username || session.user.email?.split('@')[0] || 'Meu acesso';
+    const profile = master ? 'Mestre Criador' : ({admin:'Administrador',operador:'Operador',leitor:'Leitor'}[groupRole()] || 'Usuário');
+    account.innerHTML = `<span class="avatar" aria-hidden="true">${escape(user.slice(0,2).toUpperCase())}</span><div><strong>${escape(user)}</strong><small>${profile}</small></div>`;
+    const signout = action('Sair', async () => {
       const {error} = await client.auth.signOut();
       if (error) throw error;
       session = null; group = null; master = false; groups = []; clients = []; team = []; page = 'painel'; activeEdital = null; await load(); render();
     },account);
-    if (master) action('Mestre Gerenciador',openClients,nav).setAttribute('aria-current',String(page==='clientes'));
+    signout.className = 'signout';
+    signout.setAttribute('aria-label','Sair');
+    signout.title = 'Sair';
+    signout.innerHTML = icon('sair');
+    if (master) navAction('clientes','Mestre Gerenciador',openClients,nav);
     if (!groups.length) {
       if (page === 'clientes' && master) renderClients(view);
       else panel(view,'<p>Seu usuário ainda está sem vínculo com uma empresa.</p>');
       return;
     }
-    if (groupRole() === 'admin') action('Minha equipe',openTeam,nav).setAttribute('aria-current',String(page==='equipe'));
+
     const select = document.createElement('select');
     select.setAttribute('aria-label','Empresa cliente');
     groups.forEach(g => select.add(new Option(g.nome,g.id)));
@@ -292,22 +362,15 @@ function render() {
     nav.append(select);
   }
   for (const [key,label] of Object.entries(screens)) {
-    action(label,() => {page=key;activeEdital=null;message('');render();},nav).setAttribute('aria-current',String(key===page));
+    navAction(key,label,()=>goTo(key),nav);
   }
+  if (groupRole() === 'admin') navAction('equipe','Minha equipe',openTeam,nav);
   if (page === 'clientes' && master) { renderClients(view); return; }
   if (page === 'equipe' && groupRole() === 'admin') { renderTeam(view); return; }
   if (activeEdital) { renderProposal(view,db.editais.find(x => x.id === activeEdital)); return; }
   if (page === 'propostas' || page === 'documentacao') { renderEditalIndex(view,page==='documentacao'); return; }
   if (page === 'painel') {
-    const hero = document.createElement('section');
-    hero.className = 'hero';
-    hero.innerHTML = '<div><h2>Da captação à proposta</h2><p>Acompanhe oportunidades, prazos e valores da sua empresa.</p></div>';
-    writeAction('Nova oportunidade', () => edital(), hero, true);
-    view.append(hero);
-    const grid = document.createElement('div');
-    grid.className = 'grid dashboard-metrics';
-    view.append(grid);
-    for (const [label,value] of [['Oportunidades',db.editais.length],['Aprovadas',db.editais.filter(x=>x.status==='Aprovado').length],['CNPJs',db.empresas.length],['Valor em propostas',money.format(total(db.itens))]]) panel(grid,escape(label)+'<span class="stat">'+escape(value)+'</span>');
+    renderOverview(view);
   } else if (page === 'empresas') {
     const section = panel(view,'<h2>Empresas e estabelecimentos</h2>');
     writeAction('Cadastrar empresa',company,section,true);
