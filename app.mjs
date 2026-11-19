@@ -1,0 +1,281 @@
+import {supabaseUrl, supabasePublishableKey} from './config.mjs';
+
+const client = supabaseUrl && supabasePublishableKey
+  ? window.supabase.createClient(supabaseUrl, supabasePublishableKey) : null;
+const stages = ['Captado','Em análise','Aprovado','Reprovado'];
+const modalities = ['Pregão eletrônico','Pregão presencial','Concorrência','Dispensa','Inexigibilidade','Aquisição simplificada · Caixa Escolar','Chamada pública','Obra · Caixa Escolar','Processo análogo','Pesquisa de preços','Concurso','Leilão','Diálogo competitivo'];
+const money = new Intl.NumberFormat('pt-BR',{style:'currency',currency:'BRL'});
+const byId = id => document.getElementById(id);
+const escape = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const message = text => { byId('notice').textContent = text; };
+const tables = ['empresas','editais','itens','documentos'];
+const db = Object.fromEntries(tables.map(table => [table,[]]));
+const localKey = 'elementar-licitacoes-demo-v1';
+const screens = {painel:'Painel geral',editais:'Captação',empresas:'Empresas e CNPJs'};
+let page = 'painel';
+let activeEdital;
+let group;
+let session;
+let groups = [];
+
+function action(label, run, parent, primary = false) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.textContent = label;
+  if (primary) button.className = 'primary';
+  button.onclick = () => Promise.resolve().then(run).catch(error => message(error.message));
+  parent.append(button);
+  return button;
+}
+
+function edit(title, fields, save) {
+  const form = byId('form');
+  byId('editor-title').textContent = title;
+  form.replaceChildren();
+  for (const [name,label,type,value,options] of fields) {
+    const wrapper = document.createElement('label');
+    wrapper.textContent = label;
+    const field = document.createElement(type === 'select' ? 'select' : 'input');
+    field.name = name;
+    if (type === 'select') {
+      for (const option of options) {
+        const [key,text] = Array.isArray(option) ? option : [option,option];
+        field.add(new Option(text,key));
+      }
+    } else {
+      field.type = type;
+      if (type === 'number') { field.step = 'any'; field.min = '0'; }
+    }
+    field.value = value ?? '';
+    field.required = !['sessao','validade','parecer','empresa_id'].includes(name);
+    wrapper.append(field);
+    form.append(wrapper);
+  }
+  const controls = document.createElement('div');
+  controls.className = 'line';
+  const submit = document.createElement('button');
+  submit.textContent = 'Salvar';
+  submit.type = 'submit';
+  submit.className = 'primary';
+  controls.append(submit);
+  action('Cancelar', () => byId('editor').close(), controls);
+  form.append(controls);
+  form.onsubmit = async event => {
+    event.preventDefault();
+    submit.disabled = true;
+    try {
+      message('');
+      await save(Object.fromEntries(new FormData(form)));
+      byId('editor').close();
+      render();
+    } catch (error) {
+      form.querySelector('[role=alert]')?.remove();
+      const alert = document.createElement('p');
+      alert.setAttribute('role','alert');
+      alert.textContent = error.message;
+      form.append(alert);
+    } finally { submit.disabled = false; }
+  };
+  byId('editor').showModal();
+}
+
+async function load() {
+  if (!client) {
+    const data = JSON.parse(localStorage.getItem(localKey) || '{}');
+    tables.forEach(table => { db[table] = data[table] ?? []; });
+    return;
+  }
+  if (!group) { tables.forEach(table => { db[table] = []; }); return; }
+  const responses = await Promise.all(tables.map(table => client.from(table).select().eq('grupo_id',group)));
+  for (const response of responses) if (response.error) throw response.error;
+  responses.forEach(({data},i) => { db[tables[i]] = data; });
+}
+
+async function save(table, values, id) {
+  if (!client) {
+    const records = db[table];
+    const index = records.findIndex(record => record.id === id);
+    if (index >= 0) records[index] = {...records[index],...values};
+    else records.push({...values,id:crypto.randomUUID()});
+    localStorage.setItem(localKey,JSON.stringify(db));
+    return;
+  }
+  const query = client.from(table);
+  const request = id ? query.update(values).eq('grupo_id',group).eq('id',id) : query.insert({...values,grupo_id:group});
+  const {error} = await request.select('id').single();
+  if (error) throw error;
+  await load();
+}
+
+const canWrite = () => !client || groups.find(item => item.id === group)?.role !== 'leitor';
+const writeAction = (label,run,parent,primary) => { if (canWrite()) action(label,run,parent,primary); };
+
+function company() {
+  edit('Cadastrar empresa',[
+    ['nome','Razão social','text'],['cnpj','CNPJ completo','text'],
+    ['porte','Enquadramento informado','select','MEI',['MEI','MEI Caminhoneiro','ME','EPP','Demais']]
+  ], values => {
+    values.cnpj = values.cnpj.toUpperCase().replace(/[./\s-]/g,'');
+    if (!/^[A-Z0-9]{12}[0-9]{2}$/.test(values.cnpj)) throw new Error('Informe um CNPJ com 14 caracteres.');
+    if (db.empresas.some(row => row.cnpj === values.cnpj)) throw new Error('CNPJ já cadastrado neste grupo.');
+    return save('empresas',values);
+  });
+}
+
+function edital(row = {}) {
+  edit(row.id ? 'Atualizar oportunidade' : 'Nova oportunidade',[
+    ['numero','Identificação do processo','text',row.numero],['orgao','Órgão comprador','text',row.orgao],
+    ['modalidade','Modalidade ou procedimento','select',row.modalidade ?? modalities[0],modalities],
+    ['sessao','Data da sessão','date',row.sessao],
+    ['empresa_id','CNPJ participante','select',row.empresa_id ?? '',[['','A definir'],...db.empresas.map(e => [e.id,e.nome+' · '+e.cnpj])]],
+    ['status','Situação','select',row.status ?? stages[0],stages],
+    ['parecer','Parecer da equipe','text',row.parecer]
+  ], values => {
+    if (values.status === 'Aprovado' && !values.empresa_id) throw new Error('Escolha o CNPJ participante antes de aprovar.');
+    if (['Aprovado','Reprovado'].includes(values.status) && !values.parecer.trim()) throw new Error('Registre o motivo da decisão.');
+    return save('editais',{...values,empresa_id:values.empresa_id || null,sessao:values.sessao || null},row.id);
+  });
+}
+
+function item(row, previous = {}) {
+  edit(previous.id ? 'Editar item da proposta' : 'Novo item da proposta',[
+    ['codigo','Código do item','text',previous.codigo],['descricao','Descrição','text',previous.descricao],
+    ['quantidade','Quantidade solicitada','number',previous.quantidade],
+    ['embalagem','Unidades por embalagem','number',previous.embalagem ?? 1],
+    ['custo_embalagem','Custo por embalagem (R$)','number',previous.custo_embalagem],
+    ['margem','Margem bruta desejada (%)','number',previous.margem ?? 18]
+  ], values => {
+    for (const key of ['quantidade','embalagem','custo_embalagem','margem']) values[key] = Number(values[key]);
+    if (values.quantidade <= 0 || values.embalagem <= 0 || values.margem >= 100) throw new Error('Quantidade e embalagem devem ser positivas. A margem deve ser inferior a 100%.');
+    if (db.itens.some(x => x.edital_id === row.id && x.codigo === values.codigo && x.id !== previous.id)) throw new Error('Código já cadastrado nesta proposta.');
+    return save('itens',{...values,edital_id:row.id},previous.id);
+  });
+}
+
+function documentEditor(row, previous = {}) {
+  edit(previous.id ? 'Conferir documento' : 'Adicionar requisito',[
+    ['nome','Documento exigido','text',previous.nome],
+    ['validade','Validade','date',previous.validade],
+    ['conferido','Situação','select',previous.conferido ? 'sim' : 'nao',[['nao','Pendente'],['sim','Conferido']]]
+  ], values => save('documentos',{...values,edital_id:row.id,validade:values.validade || null,conferido:values.conferido === 'sim'},previous.id));
+}
+
+const price = i => Number(i.preco_unitario ?? (Math.round((i.custo_embalagem / i.embalagem / (1 - i.margem / 100) + Number.EPSILON)*100)/100));
+const total = rows => rows.reduce((sum,row) => sum + Math.round(price(row)*row.quantidade*100),0)/100;
+const panel = (container, html) => {
+  const section = document.createElement('section');
+  section.className = 'panel';
+  section.innerHTML = html;
+  container.append(section);
+  return section;
+};
+
+function render() {
+  const nav = byId('nav');
+  const view = byId('view');
+  const account = byId('account');
+  for (const node of [nav,view,account]) node.replaceChildren();
+  byId('connection').textContent = client ? 'Ambiente conectado ao Supabase' : 'Modo demonstração · dados salvos somente neste navegador';
+  if (client && !session) {
+    action('Entrar', () => edit('Acessar sua conta', [['email','E-mail','email'],['password','Senha','password']], async values => {
+      const {data,error} = await client.auth.signInWithPassword(values);
+      if (error) throw error;
+      session = data.session;
+      await loadGroups();
+    }), account,true);
+    panel(view,'<p>Entre com uma conta autorizada para acessar as licitações da sua empresa.</p>');
+    return;
+  }
+  if (client) {
+    action('Sair', async () => {
+      const {error} = await client.auth.signOut();
+      if (error) throw error;
+      session = null; group = null; await load(); render();
+    },account);
+    if (!groups.length) { panel(view,'<p>Seu usuário ainda está sem vínculo com um grupo.</p>'); return; }
+    const select = document.createElement('select');
+    select.setAttribute('aria-label','Grupo empresarial');
+    groups.forEach(g => select.add(new Option(g.nome,g.id)));
+    select.value = group;
+    select.onchange = async () => {
+      const previous = group;
+      group = select.value; activeEdital = null;
+      try { await load(); render(); }
+      catch(error) { group = previous; select.value = previous; message(error.message); }
+    };
+    nav.append(select);
+  }
+  for (const [key,label] of Object.entries(screens)) {
+    action(label,() => {page=key;activeEdital=null;message('');render();},nav).setAttribute('aria-current',String(key===page));
+  }
+  if (activeEdital) { renderProposal(view,db.editais.find(x => x.id === activeEdital)); return; }
+  if (page === 'painel') {
+    const grid = document.createElement('div');
+    grid.className = 'grid';
+    view.append(grid);
+    for (const [label,value] of [['Oportunidades',db.editais.length],['Aprovadas',db.editais.filter(x=>x.status==='Aprovado').length],['CNPJs',db.empresas.length],['Valor em propostas',money.format(total(db.itens))]]) panel(grid,escape(label)+'<span class="stat">'+escape(value)+'</span>');
+  } else if (page === 'empresas') {
+    const section = panel(view,'<h2>Empresas e estabelecimentos</h2>');
+    writeAction('Cadastrar empresa',company,section,true);
+    for (const e of db.empresas) panel(section,'<strong>'+escape(e.nome)+'</strong><p>'+escape(e.cnpj)+' · '+escape(e.porte)+'</p>');
+  } else {
+    writeAction('Nova oportunidade',()=>edital(),view,true);
+    const grid = document.createElement('div');
+    grid.className = 'grid'; grid.style.marginTop='14px';
+    view.append(grid);
+    for (const stage of stages) {
+      const lane = document.createElement('section');
+      lane.className = 'lane';
+      const rows = db.editais.filter(row => row.status===stage);
+      lane.innerHTML = '<h3>'+escape(stage)+' · '+rows.length+'</h3>';
+      grid.append(lane);
+      for (const row of rows) {
+        const card = panel(lane,'<strong>'+escape(row.numero)+'</strong><p>'+escape(row.orgao)+'</p><p class="muted">'+escape(row.modalidade)+'</p>');
+        card.classList.add('card');
+        writeAction('Analisar',()=>edital(row),card);
+        if (row.status==='Aprovado' || db.itens.some(x=>x.edital_id===row.id)) action('Abrir proposta',()=>{activeEdital=row.id;render();},card,true);
+      }
+    }
+  }
+}
+
+function renderProposal(view,row) {
+  const rows = db.itens.filter(x=>x.edital_id===row.id);
+  const docs = db.documentos.filter(x=>x.edital_id===row.id);
+  const section = panel(view,'<h2>Proposta · '+escape(row.numero)+'</h2><p>'+escape(row.orgao)+' · '+escape(db.empresas.find(e=>e.id===row.empresa_id)?.nome)+'</p><p>Total estimado <strong>'+money.format(total(rows))+'</strong></p>');
+  if (row.status==='Aprovado') writeAction('Adicionar item',()=>item(row),section,true);
+  const table = document.createElement('div');
+  table.className = 'scroll';
+  table.innerHTML = '<table><thead><tr><th>Item</th><th>Descrição</th><th>Qtde.</th><th>Custo unitário</th><th>Preço proposto</th><th>Total</th><th>Ações</th></tr></thead><tbody></tbody></table>';
+  section.append(table);
+  for (const entry of rows) {
+    const tr = table.querySelector('tbody').insertRow();
+    for (const value of [entry.codigo,entry.descricao,entry.quantidade,(entry.custo_embalagem/entry.embalagem).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:4}),money.format(price(entry)),money.format(total([entry]))]) tr.insertCell().textContent=value;
+    const controls=tr.insertCell();
+    if(row.status==='Aprovado') writeAction('Editar',()=>item(row,entry),controls);
+  }
+  const checklist=panel(view,'<h2>Checklist documental</h2>');
+  writeAction('Adicionar requisito',()=>documentEditor(row),checklist,true);
+  for(const doc of docs){
+    const card=panel(checklist,'<strong>'+escape(doc.nome)+'</strong><p>'+escape(doc.conferido?'Conferido':'Pendente')+(doc.validade?' · validade '+escape(doc.validade):'')+'</p>');
+    writeAction('Conferir',()=>documentEditor(row,doc),card);
+  }
+}
+
+async function loadGroups(){
+  const {data,error}=await client.from('membros').select('papel,grupos(id,nome)');
+  if(error) throw error;
+  groups=data.map(m=>({...m.grupos,role:m.papel}));
+  group=groups[0]?.id;
+  await load();
+}
+
+try {
+  if(client){
+    const {data,error}=await client.auth.getSession();
+    if(error) throw error;
+    session=data.session;
+    if(session) await loadGroups();
+  } else await load();
+  render();
+} catch(error) { render(); message(error.message); }
