@@ -12,7 +12,7 @@ const message = text => { byId('notice').textContent = text; };
 const tables = ['empresas','editais','itens','documentos'];
 const db = Object.fromEntries(tables.map(table => [table,[]]));
 const localKey = 'elementar-licitacoes-demo-v1';
-const screens = {painel:'Visão geral',editais:'Captação',empresas:'Empresas e CNPJs',propostas:'Propostas',documentacao:'Documentação'};
+const screens = {painel:'Visão geral',editais:'Captação',propostas:'Propostas',documentacao:'Documentação',relatorios:'Relatórios',configuracoes:'Configurações',ajuda:'Central de ajuda'};
 let page = 'painel';
 let activeEdital;
 let group;
@@ -117,7 +117,7 @@ const canWrite = () => !client || ['admin','operador'].includes(groupRole());
 const writeAction = (label,run,parent,primary) => { if (canWrite()) action(label,run,parent,primary); };
 
 function company() {
-  edit('Cadastrar empresa',[
+  edit('Cadastrar CNPJ participante',[
     ['nome','Razão social','text'],['cnpj','CNPJ completo','text'],
     ['porte','Enquadramento informado','select','MEI',['MEI','MEI Caminhoneiro','ME','EPP','Demais']]
   ], values => {
@@ -230,6 +230,9 @@ const iconPaths = {
   propostas:'M5 3h10l4 4v14H5z M8 12h8 M8 16h8',
   documentacao:'M3 7h7l2 2h9v11H3z M9 14l2 2 4-4',
   empresas:'M3 21V9l9-6 9 6v12 M8 21v-7h8v7',
+  configuracoes:'M4 6h16 M4 12h16 M4 18h16 M8 3v6 M16 9v6 M10 15v6',
+  relatorios:'M4 3h16v18H4z M8 17v-4 M12 17V7 M16 17v-7',
+  ajuda:'M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0 M9 9a3 3 0 0 1 6 0c0 2-3 2-3 4 M12 17h.01',
   equipe:'M3 21v-2a4 4 0 014-4h4a4 4 0 014 4v2 M16 15a4 4 0 014 4v2 M9 11a4 4 0 100-8 4 4 0 000 8z',
   clientes:'M12 22s8-4 8-12V5l-8-3-8 3v5c0 8 8 12 8 12z',
   sair:'M10 4H4v16h6 M8 12h13 M17 8l4 4-4 4',
@@ -279,6 +282,74 @@ function renderOverview(view) {
     grid.insertAdjacentHTML('beforeend',`<div class="metric"><div><span>${label}</span><span class="metric-icon">${icon(symbol)}</span></div><strong>${escape(value)}</strong><small>${detail}</small></div>`);
   }
   view.append(grid);
+}
+
+function renderReports(view) {
+  const report = panel(view,'<h2>Editais por data da sessão</h2><form class="line"><label>De<input name="from" type="date"></label><label>Até<input name="to" type="date"></label><label>Situação<select name="status"></select></label><button type="submit" class="primary">Filtrar</button></form><p role="alert"></p><div class="scroll"></div>');
+  const form = report.querySelector('form');
+  const status = form.elements.namedItem('status');
+  status.add(new Option('Todas',''));
+  stages.forEach(stage => status.add(new Option(stage)));
+  const results = report.querySelector('.scroll');
+  const alert = report.querySelector('[role=alert]');
+  const totals = new Map();
+  for (const item of db.itens) {
+    totals.set(item.edital_id,(totals.get(item.edital_id) ?? 0) + Math.round(price(item)*item.quantidade*100));
+  }
+  function draw() {
+    const {from,to,status} = Object.fromEntries(new FormData(form));
+    if (from && to && from > to) {
+      alert.textContent = 'A data inicial deve ser anterior ou igual à final.';
+      results.replaceChildren();
+      return;
+    }
+    alert.textContent = '';
+    const rows = db.editais.filter(row => (!status || row.status === status)
+      && (!from || (row.sessao && row.sessao >= from))
+      && (!to || (row.sessao && row.sessao <= to)));
+    const value = rows.reduce((sum,row) => sum + (totals.get(row.id) ?? 0),0);
+    results.innerHTML = `<p><strong>${rows.length}</strong> edital(is) · <strong>${money.format(value/100)}</strong> em propostas</p>`;
+    if (!rows.length) {
+      results.insertAdjacentHTML('beforeend','<p>Nenhum edital encontrado.</p>');
+      return;
+    }
+    results.insertAdjacentHTML('beforeend',`<table><thead><tr><th>Processo</th><th>Órgão</th><th>Sessão</th><th>Situação</th><th>Valor da proposta</th></tr></thead><tbody>${rows.map(row => {
+      const date = row.sessao ? row.sessao.split('-').reverse().join('/') : 'A definir';
+      return '<tr>'+[row.numero,row.orgao,date,row.status,totals.has(row.id) ? money.format(totals.get(row.id)/100) : '—'].map(value=>'<td>'+escape(value)+'</td>').join('')+'</tr>';
+    }).join('')}</tbody></table>`);
+  }
+  form.onsubmit = event => { event.preventDefault(); draw(); };
+  draw();
+}
+
+function renderHelp(view) {
+  const articles = [
+    ['configuracoes','Onde cadastrar o CNPJ participante?','Em Configurações, abra CNPJs participantes e informe a razão social, o CNPJ e o enquadramento.'],
+    ['editais','Como aprovar uma oportunidade?','Abra a oportunidade em Captação, selecione o CNPJ participante e registre o parecer da equipe.'],
+    ['propostas','Como montar a proposta?','Abra um edital aprovado em Propostas e informe os itens, as quantidades, os custos e as margens.'],
+    ['documentacao','Como conferir os documentos?','Abra o checklist do edital em Documentação, registre as validades e marque os requisitos conferidos.'],
+    ['relatorios','Como acompanhar valores e prazos?','Em Relatórios, filtre os editais pela data da sessão e pela situação.']
+  ];
+  const section = panel(view,'<label>Buscar no manual<input type="search" placeholder="Ex.: CNPJ ou proposta"></label><p role="status"></p><div></div>');
+  const search = section.querySelector('input');
+  const results = section.lastElementChild;
+  const status = section.querySelector('[role=status]');
+  const normalize = value => value.toLowerCase().normalize('NFD').replace(/\p{Diacritic}/gu,'');
+  function draw() {
+    const query = normalize(search.value.trim());
+    const matches = articles.filter(([,title,body]) => normalize(title+' '+body).includes(query));
+    results.replaceChildren();
+    status.textContent = matches.length ? '' : 'Nenhuma orientação encontrada.';
+    for (const [route,title,body] of matches) {
+      const detail = document.createElement('details');
+      detail.className = 'card';
+      detail.innerHTML = `<summary>${title}</summary><p>${body}</p>`;
+      action('Abrir '+screens[route],()=>goTo(route),detail);
+      results.append(detail);
+    }
+  }
+  search.oninput = draw;
+  draw();
 }
 
 function render() {
@@ -369,11 +440,14 @@ function render() {
   if (page === 'equipe' && groupRole() === 'admin') { renderTeam(view); return; }
   if (activeEdital) { renderProposal(view,db.editais.find(x => x.id === activeEdital)); return; }
   if (page === 'propostas' || page === 'documentacao') { renderEditalIndex(view,page==='documentacao'); return; }
+  if (page === 'relatorios') { renderReports(view); return; }
+  if (page === 'ajuda') { renderHelp(view); return; }
   if (page === 'painel') {
     renderOverview(view);
-  } else if (page === 'empresas') {
-    const section = panel(view,'<h2>Empresas e estabelecimentos</h2>');
-    writeAction('Cadastrar empresa',company,section,true);
+  } else if (page === 'configuracoes') {
+    const section = panel(view,'<h2>CNPJs participantes</h2><p>Cadastre os CNPJs que sua empresa usa para participar de licitações. Eles ficam disponíveis para seleção no edital.</p>');
+    writeAction('Cadastrar CNPJ',company,section,true);
+    if (!db.empresas.length) section.insertAdjacentHTML('beforeend','<p class="muted">Nenhum CNPJ cadastrado.</p>');
     for (const e of db.empresas) panel(section,'<strong>'+escape(e.nome)+'</strong><p>'+escape(e.cnpj)+' · '+escape(e.porte)+'</p>');
   } else {
     writeAction('Nova oportunidade',()=>edital(),view,true);
