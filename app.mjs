@@ -10,9 +10,30 @@ const byId = id => document.getElementById(id);
 const escape = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const message = text => { byId('notice').textContent = text; };
 const tables = ['empresas','editais','itens','documentos'];
-const db = Object.fromEntries(tables.map(table => [table,[]]));
+const registryTables = ['orgaos_compradores','catalogo'];
+const allTables = [...tables,...registryTables];
+const db = Object.fromEntries(allTables.map(table => [table,[]]));
+const unavailableRegistries = new Set();
 const localKey = 'elementar-licitacoes-demo-v1';
-const screens = {painel:'Visão geral',editais:'Captação',propostas:'Propostas',documentacao:'Documentação',relatorios:'Relatórios',configuracoes:'Configurações',ajuda:'Central de ajuda'};
+const screens = {
+  painel:'Visão geral',orgaos:'Prefeituras / Clientes',catalogo:'Produtos / Serviços',
+  cotacoes:'Cotações de Preços',orcamento:'Orçamento',editais:'Captação',
+  propostas:'Propostas',documentacao:'Documentação',propostaPronta:'Proposta Pronta',
+  disputa:'Disputa',acompanhamento:'Acompanhamento da Licitação',
+  finalizados:'Processos Finalizados',logistica:'Logística',financeiro:'Financeiro',
+  configuracoes:'Configurações',aplicativo:'Aplicativo',ajuda:'Central de Ajuda'
+};
+const pendingScreens = {
+  cotacoes:'Solicitações de cotação e revisão de preços para fornecedores, com exportação em PDF e XML.',
+  orcamento:'Orçamentos para órgãos compradores antes da publicação do edital.',
+  propostaPronta:'Pacote ZIP com a proposta inicial e os documentos selecionados do CNPJ participante.',
+  disputa:'Acompanhamento de lances e simulação de preços pela margem.',
+  acompanhamento:'Negociação após a disputa, emissão de proposta readequada e acompanhamento até a assinatura.',
+  finalizados:'Arquivo de ARP, ata da sessão, contratos e documentos do processo.',
+  logistica:'Solicitações do órgão, saldo por item e alertas de 30%, 10% e 5%.',
+  financeiro:'Análise de custos e solicitação de reajuste ou revisão de preços.',
+  aplicativo:'Instalação e acesso ao aplicativo.'
+};
 let page = 'painel';
 let activeEdital;
 let group;
@@ -52,7 +73,7 @@ function edit(title, fields, save) {
       if (type === 'number') { field.step = 'any'; field.min = '0'; }
     }
     field.value = value ?? '';
-    field.required = !['sessao','validade','parecer','empresa_id'].includes(name);
+    field.required = !['sessao','validade','parecer','empresa_id','email','marca','detalhes','observacao'].includes(name);
     wrapper.append(field);
     form.append(wrapper);
   }
@@ -87,13 +108,25 @@ function edit(title, fields, save) {
 async function load() {
   if (!client) {
     const data = JSON.parse(localStorage.getItem(localKey) || '{}');
-    tables.forEach(table => { db[table] = data[table] ?? []; });
+    allTables.forEach(table => { db[table] = data[table] ?? []; });
     return;
   }
-  if (!group) { tables.forEach(table => { db[table] = []; }); return; }
-  const responses = await Promise.all(tables.map(table => client.from(table).select().eq('grupo_id',group)));
-  for (const response of responses) if (response.error) throw response.error;
-  responses.forEach(({data},i) => { db[tables[i]] = data; });
+  if (!group) {
+    allTables.forEach(table => { db[table] = []; });
+    unavailableRegistries.clear();
+    return;
+  }
+  const responses = await Promise.all(allTables.map(table => client.from(table).select().eq('grupo_id',group)));
+  const missing = new Set();
+  responses.forEach(({error},i) => {
+    if (!error) return;
+    const table = allTables[i];
+    if (!registryTables.includes(table) || !['PGRST205','42P01'].includes(error.code)) throw error;
+    missing.add(table);
+  });
+  unavailableRegistries.clear();
+  missing.forEach(table => unavailableRegistries.add(table));
+  responses.forEach(({data},i) => { db[allTables[i]] = data ?? []; });
 }
 
 async function save(table, values, id) {
@@ -141,6 +174,69 @@ function edital(row = {}) {
     if (['Aprovado','Reprovado'].includes(values.status) && !values.parecer.trim()) throw new Error('Registre o motivo da decisão.');
     return save('editais',{...values,empresa_id:values.empresa_id || null,sessao:values.sessao || null},row.id);
   });
+}
+
+function renderRegistry(view, agencies) {
+  const table = agencies ? 'orgaos_compradores' : 'catalogo';
+  const singular = agencies ? 'órgão comprador' : 'produto ou serviço';
+  const heading = agencies ? 'Órgãos compradores' : 'Catálogo de produtos e serviços';
+  const section = panel(view,`<h2>${heading}</h2>`);
+  if (unavailableRegistries.has(table)) {
+    section.insertAdjacentHTML('beforeend','<p>Este cadastro aguarda a atualização do banco de dados.</p>');
+    return;
+  }
+  function open(row = {}) {
+    const fields = agencies ? [
+      ['nome','Razão social / Nome do órgão','text',row.nome],
+      ['cnpj','CNPJ','text',row.cnpj],['municipio','Município','text',row.municipio],
+      ['uf','UF','select',row.uf ?? 'MG','AC AL AP AM BA CE DF ES GO MA MT MS MG PA PB PR PE PI RJ RN RS RO RR SC SP SE TO'.split(' ')],
+      ['email','E-mail institucional','email',row.email]
+    ] : [
+      ['codigo','Código','text',row.codigo],['descricao','Descrição','text',row.descricao],
+      ['tipo','Tipo','select',row.tipo ?? 'Produto',['Produto','Serviço']],['unidade','Unidade de medida','text',row.unidade],
+      ['marca','Marca','text',row.marca],['detalhes','Detalhes','text',row.detalhes],
+      ['observacao','Observações','text',row.observacao],['custo','Custo unitário (R$)','number',row.custo],
+      ['margem','Margem sugerida (%)','number',row.margem ?? 18]
+    ];
+    edit((row.id ? 'Editar ' : 'Cadastrar ')+singular,fields,async values => {
+      for (const key of Object.keys(values)) values[key] = values[key].trim();
+      if (agencies) {
+        values.cnpj = normalizeDocument(values.cnpj);
+        if (values.cnpj.length !== 14 || !validDocument(values.cnpj)) throw new Error('Informe um CNPJ válido.');
+        if (!values.nome || !values.municipio) throw new Error('Informe o órgão e o município.');
+      } else {
+        values.custo = Number(values.custo);
+        values.margem = Number(values.margem);
+        if (!values.codigo || !values.descricao || !values.unidade) throw new Error('Informe código, descrição e unidade.');
+        if (values.margem >= 100) throw new Error('A margem deve ser inferior a 100%.');
+      }
+      const key = agencies ? 'cnpj' : 'codigo';
+      if (db[table].some(entry => entry[key] === values[key] && entry.id !== row.id)) {
+        throw new Error(agencies ? 'Este CNPJ já está cadastrado.' : 'Este código já está cadastrado.');
+      }
+      await save(table,values,row.id);
+    });
+  }
+  writeAction('Cadastrar '+singular,()=>open(),section,true);
+  section.insertAdjacentHTML('beforeend','<label>Buscar cadastro<input type="search"></label><div></div>');
+  const search = section.querySelector('input');
+  const list = section.lastElementChild;
+  function draw() {
+    const query = search.value.trim().toLocaleLowerCase('pt-BR');
+    list.replaceChildren();
+    const rows = db[table].filter(row => (agencies ? [row.nome,row.cnpj,row.municipio,row.uf]
+      : [row.codigo,row.descricao,row.tipo,row.marca]).some(value => String(value ?? '').toLocaleLowerCase('pt-BR').includes(query)));
+    if (!rows.length) list.textContent = 'Nenhum cadastro encontrado.';
+    for (const row of rows) {
+      const title = agencies ? row.nome : row.codigo+' · '+row.descricao;
+      const subtitle = agencies ? row.cnpj+' · '+row.municipio+'/'+row.uf
+        : row.tipo+' · '+row.unidade+' · Custo '+money.format(row.custo);
+      const card = panel(list,'<strong>'+escape(title)+'</strong><p>'+escape(subtitle)+'</p>');
+      writeAction('Editar',()=>open(row),card);
+    }
+  }
+  search.oninput = draw;
+  draw();
 }
 
 function item(row, previous = {}) {
@@ -225,11 +321,47 @@ function renderEditalIndex(view, docs) {
   }
 }
 
+function renderProposalBoard(view) {
+  const lanes = {
+    'A montar':[], 'Em preparação':[], 'Checklist conferido':[]
+  };
+  for (const edital of db.editais.filter(row => row.status === 'Aprovado')) {
+    const items = db.itens.filter(row => row.edital_id === edital.id);
+    const documents = db.documentos.filter(row => row.edital_id === edital.id);
+    const stage = !items.length ? 'A montar'
+      : documents.length && documents.every(doc => doc.conferido) ? 'Checklist conferido'
+      : 'Em preparação';
+    lanes[stage].push({edital,items,documents});
+  }
+  const grid = document.createElement('section');
+  grid.className = 'grid';
+  for (const [stage,proposals] of Object.entries(lanes)) {
+    const lane = document.createElement('section');
+    lane.className = 'lane';
+    lane.innerHTML = `<h3>${stage} · ${proposals.length}</h3>`;
+    for (const {edital,items,documents} of proposals) {
+      const card = panel(lane,`<strong>${escape(edital.numero)}</strong><p>${escape(edital.orgao)}</p><p>${money.format(total(items))}</p><p class="muted">${documents.filter(doc=>doc.conferido).length}/${documents.length} documentos conferidos</p>`);
+      card.classList.add('card');
+      function open(mode) {
+        detailMode = mode;
+        activeEdital = edital.id;
+        render();
+      }
+      action('Abrir proposta',()=>open('proposal'),card);
+      action('Documentação',()=>open('docs'),card);
+    }
+    grid.append(lane);
+  }
+  view.append(grid);
+}
+
 const iconPaths = {
   painel:'M3 10l9-7 9 7v10h-6v-6H9v6H3z', editais:'M3 4h18v16H3z M9 4v12 M15 4v9',
   propostas:'M5 3h10l4 4v14H5z M8 12h8 M8 16h8',
   documentacao:'M3 7h7l2 2h9v11H3z M9 14l2 2 4-4',
   empresas:'M3 21V9l9-6 9 6v12 M8 21v-7h8v7',
+  orgaos:'M3 9l9-6 9 6z M5 10v9 M10 10v9 M14 10v9 M19 10v9 M3 21h18',
+  catalogo:'M3 7l9-4 9 4v10l-9 4-9-4z M3 7l9 4 9-4 M12 11v10',
   configuracoes:'M4 6h16 M4 12h16 M4 18h16 M8 3v6 M16 9v6 M10 15v6',
   relatorios:'M4 3h16v18H4z M8 17v-4 M12 17V7 M16 17v-7',
   ajuda:'M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0 M9 9a3 3 0 0 1 6 0c0 2-3 2-3 4 M12 17h.01',
@@ -249,8 +381,8 @@ function goTo(key) {
 }
 function navAction(key,label,run,parent) {
   const button = action(label,run,parent);
-  button.insertAdjacentHTML('afterbegin',icon(key));
-  button.setAttribute('aria-current',String(key === page));
+  button.insertAdjacentHTML('afterbegin',icon(iconPaths[key] ? key : 'propostas'));
+  button.setAttribute('aria-current',String(key === page || (key === 'painel' && page === 'relatorios')));
 }
 function renderOverview(view) {
   const editais = db.editais;
@@ -271,6 +403,7 @@ function renderOverview(view) {
   board.className = 'accent';
   board.insertAdjacentHTML('beforeend',icon('arrow'));
   action('Ver propostas',()=>goTo('propostas'),controls).className = 'outline-light';
+  action('Ver relatórios',()=>goTo('relatorios'),controls).className = 'outline-light';
   view.append(overview);
   const grid = document.createElement('section');
   grid.className = 'grid overview-metrics';
@@ -344,7 +477,7 @@ function renderHelp(view) {
       const detail = document.createElement('details');
       detail.className = 'card';
       detail.innerHTML = `<summary>${title}</summary><p>${body}</p>`;
-      action('Abrir '+screens[route],()=>goTo(route),detail);
+      action('Abrir '+(screens[route] ?? 'Relatórios'),()=>goTo(route),detail);
       results.append(detail);
     }
   }
@@ -360,7 +493,7 @@ function render() {
   const platformView = master && page === 'clientes';
   const customer = groups.find(entry => entry.id === group);
   byId('page-title').textContent = platformView ? 'Administração da plataforma'
-    : session || !client ? (page === 'equipe' ? 'Minha equipe' : screens[page] ?? 'Painel geral')
+    : session || !client ? (page === 'equipe' ? 'Minha equipe' : page === 'relatorios' ? 'Relatórios' : screens[page] ?? 'Painel geral')
     : 'Acesso ao sistema';
   byId('connection').textContent = !client ? 'Modo demonstração · dados salvos somente neste navegador'
     : platformView ? 'E-Lementar · desenvolvedora da plataforma'
@@ -439,9 +572,15 @@ function render() {
   if (page === 'clientes' && master) { renderClients(view); return; }
   if (page === 'equipe' && groupRole() === 'admin') { renderTeam(view); return; }
   if (activeEdital) { renderProposal(view,db.editais.find(x => x.id === activeEdital)); return; }
-  if (page === 'propostas' || page === 'documentacao') { renderEditalIndex(view,page==='documentacao'); return; }
+  if (page === 'propostas') { renderProposalBoard(view); return; }
+  if (page === 'documentacao') { renderEditalIndex(view,true); return; }
   if (page === 'relatorios') { renderReports(view); return; }
+  if (page === 'orgaos' || page === 'catalogo') { renderRegistry(view,page === 'orgaos'); return; }
   if (page === 'ajuda') { renderHelp(view); return; }
+  if (Object.hasOwn(pendingScreens,page)) {
+    panel(view,'<h2>Em implantação</h2><p>'+escape(pendingScreens[page])+'</p>');
+    return;
+  }
   if (page === 'painel') {
     renderOverview(view);
   } else if (page === 'configuracoes') {
