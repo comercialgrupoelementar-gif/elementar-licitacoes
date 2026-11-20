@@ -6,7 +6,7 @@ const client = supabaseUrl && supabasePublishableKey
   ? window.supabase.createClient(supabaseUrl, supabasePublishableKey) : null;
 const stages = ['Captado','Em análise','Aprovado','Reprovado'];
 const modalities = ['Pregão eletrônico','Pregão presencial','Concorrência','Dispensa','Inexigibilidade','Aquisição simplificada · Caixa Escolar','Chamada pública','Obra · Caixa Escolar','Processo análogo','Pesquisa de preços','Concurso','Leilão','Diálogo competitivo'];
-const money = new Intl.NumberFormat('pt-BR',{style:'currency',currency:'BRL'});
+const money = new Intl.NumberFormat('pt-BR',{style:'currency',currency:'BRL',minimumFractionDigits:4,maximumFractionDigits:4});
 const byId = id => document.getElementById(id);
 const escape = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const message = text => { byId('notice').textContent = text; };
@@ -473,6 +473,18 @@ function item(row, previous = {}) {
   ], values=>save('itens',proposalItem(row,values,previous),previous.id),{decorate:form=>{
     form.elements.namedItem('produto_catalogo').required = false;
     if (previous.id && !previous.unidade) form.elements.namedItem('unidade').required = false;
+    const preview=document.createElement('p');
+    preview.setAttribute('role','status');
+    form.lastElementChild.before(preview);
+    const updatePrice=()=>{
+      const data=Object.fromEntries(new FormData(form));
+      const margin=Number(data.margem);
+      preview.textContent=data.custo_embalagem!=='' && Number(data.embalagem)>0 && margin>=0 && margin<100
+        ? 'Preço unitário '+money.format(price(data))+' · Total '+money.format(total([data]))
+        : 'Informe o custo, a embalagem e uma margem menor que 100%.';
+    };
+    form.addEventListener('input',updatePrice);
+    updatePrice();
     const label = entry=>entry.codigo+' · '+entry.descricao;
     registryPicker(form,{name:'produto_catalogo',table:'catalogo',label:'Buscar produto ou serviço',
       placeholder:'Código ou descrição',title:'Cadastrar produto ou serviço',fields:descricao=>catalogFields({descricao}),
@@ -483,8 +495,9 @@ function item(row, previous = {}) {
         fields.namedItem('unidade').value ||= entry.unidade ?? '';
         fields.namedItem('marca_item').value ||= entry.marca ?? '';
         if (!fields.namedItem('custo_embalagem').value) {
-          fields.namedItem('custo_embalagem').value = (Number(fields.namedItem('embalagem').value)||1)*Number(entry.custo);
+          fields.namedItem('custo_embalagem').value = roundPrice((Number(fields.namedItem('embalagem').value)||1)*Number(entry.custo));
         }
+        updatePrice();
       }});
   }});
 }
@@ -517,8 +530,12 @@ function documentEditor(row, previous = {}) {
   ], values => save('documentos',{...values,edital_id:row.id,validade:values.validade || null,conferido:values.conferido === 'sim'},previous.id));
 }
 
-const price = i => Number(i.preco_unitario ?? (Math.round((i.custo_embalagem / i.embalagem / (1 - i.margem / 100) + Number.EPSILON)*100)/100));
-const total = rows => rows.reduce((sum,row) => sum + Math.round(price(row)*row.quantidade*100),0)/100;
+const decimal = new Intl.NumberFormat('pt-BR',{minimumFractionDigits:4,maximumFractionDigits:4});
+const precision = 10000;
+const roundPrice = value => Math.round((value + Number.EPSILON)*precision)/precision;
+const price = item => item.custo_embalagem==null ? Number(item.preco_unitario) :
+  roundPrice(item.custo_embalagem / item.embalagem / (1 - item.margem / 100));
+const total = rows => rows.reduce((sum,row) => sum + Math.round(price(row)*row.quantidade*precision),0)/precision;
 const panel = (container, html) => {
   const section = document.createElement('section');
   section.className = 'panel';
@@ -773,7 +790,7 @@ function openQuote(view,id) {
   const table=quoteTable(section,['Código','Produto ou serviço','Quantidade','Unidade',budget?'Preço ofertado':'Preço retornado',...(budget?['Total']:[]),'Ações']);
   for (const item of row.itens) {
     const line=table.insertRow();
-    for (const value of [item.codigo,item.descricao,item.quantidade,item.unidade,item.preco == null?'Aguardando preço':money.format(item.preco),...(budget?[item.preco==null?'—':money.format(total([budgetPdfItem(item)]))]:[])]) line.insertCell().textContent=value;
+    for (const value of [item.codigo,item.descricao,decimal.format(item.quantidade),item.unidade,item.preco == null?'Aguardando preço':money.format(item.preco),...(budget?[item.preco==null?'—':money.format(total([budgetPdfItem(item)]))]:[])]) line.insertCell().textContent=value;
     const controls=line.insertCell();
     if (item.aplicado_em) controls.textContent='Custo aplicado em '+quoteDate.format(new Date(item.aplicado_em));
     else if (!budget || row.etapa<2) writeAction(row.etapa===2?'Registrar preço':'Editar item',()=>quoteItem(view,row,item),controls);
@@ -844,7 +861,7 @@ async function downloadQuote(row,format) {
     if (y>258) { pdf.addPage();y=18; }
     y+=4;
     write(item.codigo+' · '+item.descricao,10,true);
-    write('Quantidade: '+item.quantidade+' '+item.unidade+(item.marca?' · Marca: '+item.marca:''));
+    write('Quantidade: '+decimal.format(item.quantidade)+' '+item.unidade+(item.marca?' · Marca: '+item.marca:''));
     write('Preço unitário: R$ ____________________');
   }
   pdf.save(name+'.pdf');
@@ -854,7 +871,7 @@ function financialPrice(item) {
   const base=Number(item.custo)+Number(item.imposto_compra_unitario ?? 0);
   const rate=(Number(item.margem)+Number(item.imposto_venda_pct ?? 0))/100;
   if (rate>=1 || !Number.isFinite(base+rate)) return null;
-  const calculated=Math.round((base/(1-rate)+Number.EPSILON)*100)/100;
+  const calculated=roundPrice(base/(1-rate));
   return {base,calculated,final:item.preco_venda_manual==null?calculated:Number(item.preco_venda_manual)};
 }
 
@@ -907,7 +924,7 @@ function renderFinancialPrices(view) {
       if (!normalizeSearch(item.codigo+' '+item.descricao).includes(normalizeSearch(search.value.trim()))) continue;
       const result=financialPrice(item);
       const line=table.insertRow();
-      for (const value of [item.codigo+' · '+item.descricao,money.format(item.custo),money.format(item.imposto_compra_unitario ?? 0),(item.imposto_venda_pct ?? 0)+'%',item.margem+'%',result?money.format(result.calculated):'—',result?money.format(result.final)+(item.preco_venda_manual==null?'':' · manual'):'—']) line.insertCell().textContent=value;
+      for (const value of [item.codigo+' · '+item.descricao,money.format(item.custo),money.format(item.imposto_compra_unitario ?? 0),decimal.format(item.imposto_venda_pct ?? 0)+'%',decimal.format(item.margem)+'%',result?money.format(result.calculated):'—',result?money.format(result.final)+(item.preco_venda_manual==null?'':' · manual'):'—']) line.insertCell().textContent=value;
       const cell=line.insertCell();
       writeAction('Ajustar preço',()=>editFinancialPrice(item),cell);
     }
@@ -950,7 +967,7 @@ const disputeStages=['Aguardando disputa','Em disputa','Enviado para acompanhame
 const disputeResults=['Sem resultado','Estamos liderando','Concorrente liderando','Ganhamos','Perdemos','Sem vencedor'];
 const disputeFinal=s=>disputeResults.slice(3).includes(s);
 const unitCost=item=>Number(item.custo_embalagem)/Number(item.embalagem);
-const bidFloor=(cost,margin)=>Math.ceil((cost/(1-margin/100)-1e-9)*100)/100;
+const bidFloor=(cost,margin)=>Math.ceil((cost/(1-margin/100)-1e-12)*precision)/precision;
 const bidMargin=(cost,bid)=>bid>0?(1-cost/bid)*100:null;
 const disputeItems=row=>db.itens.filter(item=>item.edital_id===row.id);
 
@@ -1015,7 +1032,7 @@ function editDisputeItem(view,row,record,item) {
       const fields=form.elements;
       const margin=Number(fields.namedItem('margem').value);
       const lance=Number(fields.namedItem('lance').value);
-      preview.textContent=margin>=0 && margin<100?'Piso '+money.format(bidFloor(unitCost(item),record.margem_minima))+' · Lance pela margem '+money.format(bidFloor(unitCost(item),margin))+(lance>0?' · Margem do lance '+bidMargin(unitCost(item),lance).toFixed(2)+'%':''):'Informe uma margem menor que 100%.';
+      preview.textContent=margin>=0 && margin<100?'Piso '+money.format(bidFloor(unitCost(item),record.margem_minima))+' · Lance pela margem '+money.format(bidFloor(unitCost(item),margin))+(lance>0?' · Margem do lance '+decimal.format(bidMargin(unitCost(item),lance))+'%':''):'Informe uma margem menor que 100%.';
     };
     form.addEventListener('input',update);
     update();
@@ -1033,7 +1050,7 @@ function openDispute(view,row) {
     if(record.etapa===1) writeAction('Enviar para acompanhamento',async()=>{await moveDispute(row,record,2);openDispute(view,row);},section,true);
     if(record.etapa===2) writeAction('Reabrir disputa',async()=>{await moveDispute(row,record,1);openDispute(view,row);},section);
   }
-  section.insertAdjacentHTML('beforeend','<p>Margem mínima '+Number(record.margem_minima)+'% · Amarelo até '+(Number(record.margem_minima)+Number(record.alerta))+'% · Verde acima dessa faixa · Vermelho abaixo da mínima</p>');
+  section.insertAdjacentHTML('beforeend','<p>Margem mínima '+decimal.format(record.margem_minima)+'% · Amarelo até '+decimal.format(Number(record.margem_minima)+Number(record.alerta))+'% · Verde acima dessa faixa · Vermelho abaixo da mínima</p>');
   const items=disputeItems(row);
   let won=0,wonTotal=0;
   for(const [lot,grouped] of groupProposalItems(items)) {
@@ -1049,15 +1066,15 @@ function openDispute(view,row) {
       const suggested=bidFloor(cost,result.margem??item.margem);
       const margin=bidMargin(cost,result.lance??suggested);
       const color=margin==null?'':margin+1e-8<record.margem_minima?'Vermelho':margin<=Number(record.margem_minima)+Number(record.alerta)+1e-8?'Amarelo':'Verde';
-      const final=result.preco_final==null?null:Math.round(result.preco_final*item.quantidade*100)/100;
+      const final=result.preco_final==null?null:roundPrice(result.preco_final*item.quantidade);
       const audit=result.situacao==='Ganhamos'&&result.preco_final<floor?'Ganho abaixo do mínimo':result.situacao==='Perdemos'&&result.preco_final>=floor?'Perdido acima do mínimo':'—';
       if(result.situacao==='Ganhamos') {won++;wonTotal+=final??0;}
       const leader=result.situacao==='Estamos liderando'?'Nossa empresa':[result.concorrente,result.lance_concorrente==null?'':money.format(result.lance_concorrente)].filter(Boolean).join(' · ');
       const outcome=[result.situacao,result.situacao==='Ganhamos'?db.empresas.find(e=>e.id===row.empresa_id)?.nome:result.vencedor,result.marca_vencedora,result.observacao].filter(Boolean).join(' · ');
       const tr=table.insertRow();
-      for(const value of [item.codigo,printedDescription(item),item.quantidade,money.format(cost),money.format(price(item)),money.format(floor),money.format(suggested),result.lance==null?'—':money.format(result.lance)]) tr.insertCell().textContent=value;
+      for(const value of [item.codigo,printedDescription(item),decimal.format(item.quantidade),money.format(cost),money.format(price(item)),money.format(floor),money.format(suggested),result.lance==null?'—':money.format(result.lance)]) tr.insertCell().textContent=value;
       const signal=tr.insertCell();
-      signal.textContent=color?color+' · '+margin.toFixed(2)+'%':'—';
+      signal.textContent=color?color+' · '+decimal.format(margin)+'%':'—';
       if(color) signal.style.backgroundColor={Vermelho:'#fee2e2',Amarelo:'#fef3c7',Verde:'#dcfce7'}[color];
       for(const value of [leader||'—',outcome||'Sem resultado',result.preco_final==null?'—':money.format(result.preco_final),final==null?'—':money.format(final),audit]) tr.insertCell().textContent=value;
       const cell=tr.insertCell();
@@ -1231,7 +1248,7 @@ function renderReports(view) {
   const alert = report.querySelector('[role=alert]');
   const totals = new Map();
   for (const item of db.itens) {
-    totals.set(item.edital_id,(totals.get(item.edital_id) ?? 0) + Math.round(price(item)*item.quantidade*100));
+    totals.set(item.edital_id,(totals.get(item.edital_id) ?? 0) + Math.round(price(item)*item.quantidade*precision));
   }
   function draw() {
     const {from,to,status} = Object.fromEntries(new FormData(form));
@@ -1245,14 +1262,14 @@ function renderReports(view) {
       && (!from || (row.sessao && row.sessao >= from))
       && (!to || (row.sessao && row.sessao <= to)));
     const value = rows.reduce((sum,row) => sum + (totals.get(row.id) ?? 0),0);
-    results.innerHTML = `<p><strong>${rows.length}</strong> edital(is) · <strong>${money.format(value/100)}</strong> em propostas</p>`;
+    results.innerHTML = `<p><strong>${rows.length}</strong> edital(is) · <strong>${money.format(value/precision)}</strong> em propostas</p>`;
     if (!rows.length) {
       results.insertAdjacentHTML('beforeend','<p>Nenhum edital encontrado.</p>');
       return;
     }
     results.insertAdjacentHTML('beforeend',`<table><thead><tr><th>Processo</th><th>Órgão</th><th>Sessão</th><th>Situação</th><th>Valor da proposta</th></tr></thead><tbody>${rows.map(row => {
       const date = row.sessao ? row.sessao.split('-').reverse().join('/') : 'A definir';
-      return '<tr>'+[row.numero,row.orgao,date,row.status,totals.has(row.id) ? money.format(totals.get(row.id)/100) : '—'].map(value=>'<td>'+escape(value)+'</td>').join('')+'</tr>';
+      return '<tr>'+[row.numero,row.orgao,date,row.status,totals.has(row.id) ? money.format(totals.get(row.id)/precision) : '—'].map(value=>'<td>'+escape(value)+'</td>').join('')+'</tr>';
     }).join('')}</tbody></table>`);
   }
   form.onsubmit = event => { event.preventDefault(); draw(); };
@@ -1827,7 +1844,7 @@ function renderProposal(view,row) {
   section.append(table);
   for (const entry of rows) {
     const tr = table.querySelector('tbody').insertRow();
-    for (const value of [entry.lote,entry.codigo,catalogCode(entry),printedDescription(entry),entry.quantidade,entry.unidade,entry.marca,(entry.custo_embalagem/entry.embalagem).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:4}),entry.margem+'%',entry.fornecedor,entry.observacao,money.format(price(entry)),money.format(total([entry]))]) tr.insertCell().textContent=value;
+    for (const value of [entry.lote,entry.codigo,catalogCode(entry),printedDescription(entry),decimal.format(entry.quantidade),entry.unidade,entry.marca,decimal.format(entry.custo_embalagem/entry.embalagem),decimal.format(entry.margem)+'%',entry.fornecedor,entry.observacao,money.format(price(entry)),money.format(total([entry]))]) tr.insertCell().textContent=value;
     const controls=tr.insertCell();
     if(row.status==='Aprovado' && proposalStage(row)<3) writeAction('Editar',()=>item(row,entry),controls);
   }
