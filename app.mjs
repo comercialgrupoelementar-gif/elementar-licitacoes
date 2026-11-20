@@ -1058,7 +1058,7 @@ function openDispute(view,row) {
       const floor=grouped.reduce((sum,item)=>sum+bidFloor(unitCost(item),record.margem_minima)*item.quantidade,0);
       section.insertAdjacentHTML('beforeend','<h3>Lote '+escape(lot)+' · Piso total '+money.format(floor)+'</h3>');
     }
-    const table=quoteTable(section,['Item','Descrição','Qtd.','Custo unit.','Proposta inicial','Piso unit.','Margem (%)','Lance sugerido','Farol da margem','Nosso lance','Liderança','Resultado','Fornecedor vencedor','Preço vencedor','Total vencedor','Auditoria','Ação']);
+    const table=quoteTable(section,['Item','Descrição','Qtd.','Custo unit.','Proposta inicial','Piso unit.','Margem (%)','Lance sugerido','Farol da margem','Nosso lance','Liderança','Resultado','Fornecedor vencedor','Preço vencedor','Total vencedor','Diferença para nosso lance (R$)','Diferença para nosso lance (%)','Nossa margem no preço vencedor','Auditoria','Ação']);
     for(const item of grouped) {
       const result=record.resultados[item.id]??{};
       const cost=unitCost(item);
@@ -1074,12 +1074,21 @@ function openDispute(view,row) {
       const marginCell=tr.insertCell();
       const suggestion=tr.insertCell();
       const signal=tr.insertCell();
-      tr.insertCell().textContent=result.lance==null?'—':money.format(result.lance)+' · '+decimal.format(bidMargin(cost,result.lance))+'%';
+      const ourBidCell=tr.insertCell();
       tr.insertCell().textContent=leader||'—';
       const outcome=tr.insertCell();
       const winner=tr.insertCell();
       const finalPrice=tr.insertCell();
       const finalTotal=tr.insertCell();
+      const differenceCash=tr.insertCell();
+      const differenceRate=tr.insertCell();
+      const winnerMargin=tr.insertCell();
+      function compareWinner(amount,ourBid=Number(result.lance??0)) {
+        differenceCash.textContent=amount>0 && ourBid>0?money.format(roundPrice(amount-ourBid)):'—';
+        differenceRate.textContent=amount>0 && ourBid>0?decimal.format((amount-ourBid)/ourBid*100)+'%':'—';
+        winnerMargin.textContent=amount>0?decimal.format(bidMargin(cost,amount))+'%':'—';
+      }
+      compareWinner(result.preco_final);
       const auditCell=tr.insertCell();
       auditCell.textContent=audit;
       const controls=tr.insertCell();
@@ -1094,6 +1103,7 @@ function openDispute(view,row) {
       finalTotal.textContent=final==null?'—':money.format(final);
       if(page!=='disputa' || record.etapa!==1 || !canWrite()) {
         marginCell.textContent=decimal.format(initialMargin);
+        ourBidCell.textContent=result.lance==null?'—':money.format(result.lance)+' · '+decimal.format(bidMargin(cost,result.lance))+'%';
         outcome.textContent=result.situacao||'Sem resultado';
         winner.textContent=result.situacao==='Ganhamos'?company:result.vencedor||'—';
         finalPrice.textContent=result.preco_final==null?'—':money.format(result.preco_final);
@@ -1110,6 +1120,7 @@ function openDispute(view,row) {
         return input;
       };
       const margin=makeInput(marginCell,'Margem','number',initialMargin);
+      const ourBid=makeInput(ourBidCell,'Nosso lance final','number',result.lance);
       const status=document.createElement('select');
       status.setAttribute('aria-label','Resultado do item '+item.codigo);
       status.style.minWidth='144px';
@@ -1125,22 +1136,26 @@ function openDispute(view,row) {
         supplier.value=own?company:status.value==='Perdemos'?externalWinner:'';
         const number=Number(amount.value);
         finalTotal.textContent=number>0?money.format(roundPrice(number*item.quantidade)):'—';
+        compareWinner(number,Number(ourBid.value));
       }
       supplier.oninput=()=>{externalWinner=supplier.value;};
       status.onchange=updateOutcome;
       amount.oninput=updateOutcome;
+      ourBid.oninput=updateOutcome;
       margin.oninput=()=>preview(margin.value===''?null:Number(margin.value));
       updateOutcome();
       const saveLine=action('Salvar item',async()=>{
         const value=Number(margin.value);
         const preco_final=amount.value===''?null:Number(amount.value);
+        const lance=ourBid.value===''?null:Number(ourBid.value);
+        if(lance!==null && (!ourBid.checkValidity() || lance<=0)) throw new Error('Informe nosso lance final maior que zero.');
         if(margin.value==='' || !margin.checkValidity() || value>=100) throw new Error('Informe uma margem de 0 a menos de 100%, com até quatro casas decimais.');
         if((preco_final!==null && (!amount.checkValidity() || preco_final<=0)) || (['Ganhamos','Perdemos'].includes(status.value) && preco_final==null)) throw new Error('Informe o preço vencedor maior que zero.');
         if(status.value==='Perdemos' && !supplier.value.trim()) throw new Error('Informe o fornecedor vencedor.');
         saveLine.disabled=true;
         try {
           const latest=db.disputas.find(entry=>entry.id===record.id);
-          await saveDispute(row,latest,{resultados:{...latest.resultados,[item.id]:{...latest.resultados[item.id],margem:value,situacao:status.value,
+          await saveDispute(row,latest,{resultados:{...latest.resultados,[item.id]:{...latest.resultados[item.id],margem:value,lance,situacao:status.value,
             vencedor:status.value==='Perdemos'?supplier.value.trim():'',preco_final}}});
           openDispute(view,row);
         } finally {saveLine.disabled=false;}
