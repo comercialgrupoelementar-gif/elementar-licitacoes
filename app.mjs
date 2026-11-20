@@ -62,7 +62,7 @@ function edit(title, fields, save, options = {}) {
   for (const [name,label,type,value,options] of fields) {
     const wrapper = document.createElement('label');
     wrapper.textContent = label;
-    const field = document.createElement(type === 'select' ? 'select' : 'input');
+    const field = document.createElement(type === 'select' || type === 'textarea' ? type : 'input');
     field.name = name;
     if (type === 'select') {
       for (const option of options) {
@@ -70,12 +70,13 @@ function edit(title, fields, save, options = {}) {
         field.add(new Option(text,key));
       }
     } else {
-      field.type = type;
+      if (type !== 'textarea') field.type = type;
       if (type === 'number') { field.step = 'any'; field.min = '0'; }
     }
     field.value = value ?? '';
     field.required = !['sessao','validade','parecer','empresa_id','email','marca','detalhes','observacao','edital_url','local_disputa','edital_pdf','nome_fantasia','logradouro','numero_endereco','complemento','bairro','cep','telefone'].includes(name);
-    if (type === 'file') field.accept = '.pdf,application/pdf';
+    if (type === 'file' || ['marca_item','fornecedor','observacao_item'].includes(name)) field.required = false;
+    if (type === 'file') field.accept = name === 'logo' ? 'image/png,image/jpeg' : '.pdf,application/pdf';
     wrapper.append(field);
     form.append(wrapper);
   }
@@ -120,7 +121,7 @@ async function load() {
     return;
   }
   const responses = await Promise.all(allTables.map(table => client.from(table).select(table === 'editais'
-    ? 'id,grupo_id,empresa_id,numero,numero_pregao,orgao,modalidade,sessao,status,parecer,edital_url,local_disputa,edital_pdf_nome'
+    ? 'id,grupo_id,empresa_id,numero,numero_pregao,orgao,modalidade,sessao,status,parecer,edital_url,local_disputa,edital_pdf_nome,objeto'
     : '*').eq('grupo_id',group)));
   const missing = new Set();
   responses.forEach(({error},i) => {
@@ -295,6 +296,7 @@ function edital(row = {}) {
     ['numero_pregao','Número do pregão','text',row.numero_pregao],
     ['orgao','Órgão comprador','select','',[]],
     ['modalidade','Modalidade ou procedimento','select',row.modalidade ?? modalities[0],modalities],
+    ['objeto','Objeto da contratação','textarea',row.objeto],
     ['edital_url','Link da publicação do edital','url',row.edital_url],
     ['local_disputa','Local ou portal da disputa','text',row.local_disputa],
     ['edital_pdf','Anexar edital em PDF','file'],
@@ -314,6 +316,8 @@ function edital(row = {}) {
       throw new Error('Informe o número do pregão.');
     }
     const {edital_pdf:file,...data} = values;
+    data.objeto = data.objeto.trim();
+    if (!data.objeto && (!row.id || row.objeto)) throw new Error('Informe o objeto da contratação.');
     const editalUrl = data.edital_url.trim();
     if (editalUrl && !safeWebUrl(editalUrl)) throw new Error('Informe um link HTTP ou HTTPS para o edital.');
     if (file.size) {
@@ -324,6 +328,7 @@ function edital(row = {}) {
       local_disputa:data.local_disputa.trim() || null,orgao:agency,empresa_id:values.empresa_id || null,sessao:values.sessao || null},row.id);
   },{decorate:form=>{
     if (row.edital_pdf_nome) form.elements.namedItem('edital_pdf').closest('label').append('Arquivo atual: '+row.edital_pdf_nome);
+    if (row.id && !row.objeto) form.elements.namedItem('objeto').required = false;
     const modalidade = form.elements.namedItem('modalidade');
     const pregao = form.elements.namedItem('numero_pregao');
     const syncPregao = () => {
@@ -439,33 +444,53 @@ function renderRegistry(view, agencies) {
 
 function item(row, previous = {}) {
   edit(previous.id ? 'Editar item da proposta' : 'Novo item da proposta',[
-    ['produto_catalogo','Produto ou serviço do catálogo','select','',[]],
-    ['codigo','Código do item','text',previous.codigo],['descricao','Descrição','text',previous.descricao],
+    ['produto_catalogo','Vincular produto ou serviço do catálogo','select','',[]],
+    ['codigo','Número do item','text',previous.codigo],
+    ['descricao','Descrição do edital','textarea',previous.descricao],
+    ['origem_descricao','Descrição que sai na proposta','select',previous.usar_descricao_interna?'interna':'edital',[['edital','Descrição do edital'],['interna','Descrição interna da empresa']]],
     ['quantidade','Quantidade solicitada','number',previous.quantidade],
+    ['unidade','Unidade de medida','text',previous.unidade],
+    ['marca_item','Marca','text',previous.marca],
     ['embalagem','Unidades por embalagem','number',previous.embalagem ?? 1],
     ['custo_embalagem','Custo por embalagem (R$)','number',previous.custo_embalagem],
-    ['margem','Margem bruta desejada (%)','number',previous.margem ?? 18]
-  ], values => {
-    delete values.produto_catalogo;
-    for (const key of ['quantidade','embalagem','custo_embalagem','margem']) values[key] = Number(values[key]);
-    if (values.quantidade <= 0 || values.embalagem <= 0 || values.margem >= 100) throw new Error('Quantidade e embalagem devem ser positivas. A margem deve ser inferior a 100%.');
-    if (db.itens.some(x => x.edital_id === row.id && x.codigo === values.codigo && x.id !== previous.id)) throw new Error('Código já cadastrado nesta proposta.');
-    return save('itens',{...values,edital_id:row.id},previous.id);
-  },{decorate:form=>{
+    ['margem','Margem bruta desejada (%)','number',previous.margem ?? 18],
+    ['fornecedor','Fornecedor','text',previous.fornecedor],
+    ['observacao_item','Observação interna','textarea',previous.observacao]
+  ], values=>save('itens',proposalItem(row,values,previous),previous.id),{decorate:form=>{
     form.elements.namedItem('produto_catalogo').required = false;
+    if (previous.id && !previous.unidade) form.elements.namedItem('unidade').required = false;
     const label = entry=>entry.codigo+' · '+entry.descricao;
     registryPicker(form,{name:'produto_catalogo',table:'catalogo',label:'Buscar produto ou serviço',
       placeholder:'Código ou descrição',title:'Cadastrar produto ou serviço',fields:descricao=>catalogFields({descricao}),
-      saveRecord:saveCatalog,entryLabel:label,searchText:entry=>label(entry)+' '+(entry.marca??''),
+      saveRecord:saveCatalog,entryLabel:label,searchText:entry=>label(entry)+' '+(entry.marca??''),initial:previous.catalogo_id??'',
       apply:entry=>{
         if (!entry) return;
         const fields = form.elements;
-        if (!fields.namedItem('codigo').value) fields.namedItem('codigo').value = entry.codigo;
-        fields.namedItem('descricao').value = entry.descricao;
-        fields.namedItem('custo_embalagem').value = (Number(fields.namedItem('embalagem').value)||1)*Number(entry.custo);
-        fields.namedItem('margem').value = entry.margem;
+        fields.namedItem('unidade').value ||= entry.unidade ?? '';
+        fields.namedItem('marca_item').value ||= entry.marca ?? '';
+        if (!fields.namedItem('custo_embalagem').value) {
+          fields.namedItem('custo_embalagem').value = (Number(fields.namedItem('embalagem').value)||1)*Number(entry.custo);
+        }
       }});
   }});
+}
+
+function proposalItem(row, values, previous = {}) {
+  const entry = db.catalogo.find(item=>item.id===values.produto_catalogo);
+  const codigo = values.codigo.trim();
+  const descricao = values.descricao.trim();
+  const unidade = values.unidade.trim();
+  if (!codigo || !descricao || (!unidade && !previous.id)) throw new Error('Informe número do item, descrição e unidade.');
+  const numbers = Object.fromEntries(['quantidade','embalagem','custo_embalagem','margem'].map(key=>[key,Number(String(values[key]).replace(',','.'))]));
+  if (!Object.keys(numbers).every(key=>String(values[key]).trim() && Number.isFinite(numbers[key])) || numbers.quantidade<=0 || numbers.embalagem<=0 || numbers.custo_embalagem<0 || numbers.margem<0 || numbers.margem>=100) {
+    throw new Error('Confira quantidade, embalagem, custo e margem. A margem deve ser menor que 100%.');
+  }
+  if (db.itens.some(item=>item.edital_id===row.id && item.codigo===codigo && item.id!==previous.id)) throw new Error('Número de item já cadastrado nesta proposta.');
+  const usar_descricao_interna = values.origem_descricao === 'interna';
+  if (usar_descricao_interna && !entry?.descricao) throw new Error('Vincule um produto do catálogo para usar a descrição interna.');
+  return {...numbers,codigo,descricao,unidade,edital_id:row.id,catalogo_id:entry?.id??null,
+    descricao_interna:entry?.id===previous.catalogo_id ? previous.descricao_interna??entry?.descricao??null : entry?.descricao??null,
+    usar_descricao_interna,marca:values.marca_item.trim(),fornecedor:values.fornecedor.trim(),observacao:values.observacao_item.trim()};
 }
 
 function documentEditor(row, previous = {}) {
@@ -832,7 +857,10 @@ function render() {
     const section = panel(view,'<h2>CNPJs participantes</h2><p>Cadastre os CNPJs que sua empresa usa para participar de licitações. Eles ficam disponíveis para seleção no edital.</p>');
     writeAction('Cadastrar CNPJ',company,section,true);
     if (!db.empresas.length) section.insertAdjacentHTML('beforeend','<p class="muted">Nenhum CNPJ cadastrado.</p>');
-    for (const e of db.empresas) panel(section,'<strong>'+escape(e.nome)+'</strong><p>'+escape(e.cnpj)+' · '+escape(e.porte)+'</p>');
+    for (const e of db.empresas) {
+      const company = panel(section,'<strong>'+escape(e.nome)+'</strong><p>'+escape(e.cnpj)+' · '+escape(e.porte)+'</p>');
+      writeAction('Logo e dados para propostas',()=>companyProposalSettings(e),company);
+    }
   } else {
     writeAction('Nova oportunidade',()=>edital(),view,true);
     const grid = document.createElement('div');
@@ -925,7 +953,7 @@ async function proposalAttachments(section,row,items) {
       if (error) throw error;
       if (data.length !== selected.size) throw new Error('Um arquivo vinculado ficou indisponível.');
       const empresa = db.empresas.find(entry=>entry.id===row.empresa_id);
-      const html = `<!doctype html><html lang="pt-BR"><meta charset="UTF-8"><title>Proposta inicial</title><h1>Proposta inicial</h1><p>${escape(row.numero)} · ${escape(row.orgao)}</p><p>${escape(empresa?.nome)} · ${escape(empresa?.cnpj)}</p><table><thead><tr><th>Item</th><th>Descrição</th><th>Quantidade</th><th>Preço unitário</th><th>Total</th></tr></thead><tbody>${items.map(item=>'<tr>'+[item.codigo,item.descricao,item.quantidade,money.format(price(item)),money.format(total([item]))].map(value=>'<td>'+escape(value)+'</td>').join('')+'</tr>').join('')}</tbody></table><p>Total: ${money.format(total(items))}</p></html>`;
+      const html = proposalHtml(row,items,empresa);
       const files = data.map((file,index)=>({name:'documentos/'+(index+1)+'-'+file.nome.replace(/[^\p{L}\p{N} ._-]/gu,'_'),bytes:Uint8Array.from(atob(file.conteudo),character=>character.charCodeAt(0))}));
       const zip = makeZip([{name:'proposta-inicial.html',bytes:new TextEncoder().encode(html)},...files]);
       const url = URL.createObjectURL(zip);
@@ -938,18 +966,125 @@ async function proposalAttachments(section,row,items) {
   }
 }
 
+const printedDescription = item=>item.usar_descricao_interna ? item.descricao_interna || item.descricao : item.descricao;
+const proposalIdentity = [
+  ['inscricao_estadual','Inscrição estadual'],['endereco','Endereço'],['telefone','Telefone / Fax'],['email','E-mail'],
+  ['banco','Banco'],['agencia','Agência'],['conta','Conta'],['signatario','Nome do signatário'],
+  ['cargo','Cargo'],['nacionalidade','Nacionalidade'],['rg','Identidade'],['cpf','CPF próprio para a proposta']
+];
+function companyProposalSettings(company) {
+  const current = company.dados_proposta ?? {};
+  edit('Dados da empresa para impressão',[
+    ...proposalIdentity.map(([key,label])=>[key,label,'text',current[key]]),
+    ['logo','Logomarca da empresa','file']
+  ],async values=>{
+    const {logo,...details}=values;
+    const dados_proposta = {...current,...details};
+    if (logo.size) {
+      if (logo.size>1024*1024 || !['image/png','image/jpeg'].includes(logo.type)) throw new Error('Use uma logomarca PNG ou JPG de até 1 MB.');
+      dados_proposta.logo = await new Promise((resolve,reject)=>{
+        const reader = new FileReader();
+        reader.onload = ()=>resolve(reader.result);
+        reader.onerror = ()=>reject(reader.error);
+        reader.readAsDataURL(logo);
+      });
+    }
+    await save('empresas',{dados_proposta},company.id);
+  },{decorate:form=>form.querySelectorAll('input').forEach(field=>field.required=false)});
+}
+
+function proposalHtml(row,items,empresa) {
+  const data = empresa?.dados_proposta ?? {};
+  const logo = /^data:image\/(png|jpeg);base64,[A-Za-z0-9+/=]+$/.test(data.logo??'') ? '<img alt="Logomarca da empresa" src="'+escape(data.logo)+'">' : '';
+  const identity = proposalIdentity.filter(([key])=>data[key]).map(([key,label])=>'<div><b>'+label+'</b> '+escape(data[key])+'</div>').join('');
+  return `<!doctype html><html lang="pt-BR"><meta charset="UTF-8"><title>Proposta comercial</title>
+  <style>body{font:13px system-ui;color:#202124;margin:32px}img{max-width:180px;max-height:90px}h1{font-size:20px}p{white-space:pre-wrap}table{width:100%;border-collapse:collapse}th,td{padding:7px;border:1px solid #aaa;text-align:left}thead{display:table-header-group}tr{break-inside:avoid}.identidade{display:grid;grid-template-columns:1fr 1fr;gap:4px 16px}footer{font-size:8px;color:#777;text-align:right;margin-top:24px}@media print{body{margin:0}}</style>
+  ${logo}<h1>PROPOSTA COMERCIAL</h1><div class="identidade"><div><b>Razão social</b> ${escape(empresa?.nome)}</div><div><b>CNPJ</b> ${escape(empresa?.cnpj)}</div>${identity}</div>
+  <p>À atenção do Setor de Licitações — ${escape(row.orgao)}</p>
+  <p><b>Processo</b> ${escape(row.numero)} · ${escape(row.modalidade)} ${escape(row.numero_pregao??'')}</p>
+  ${row.sessao?'<p><b>Data da sessão</b> '+escape(row.sessao.split('-').reverse().join('/'))+'</p>':''}
+  ${row.local_disputa?'<p><b>Local ou portal da disputa</b> '+escape(row.local_disputa)+'</p>':''}
+  <p><b>Objeto</b> ${escape(row.objeto)}</p>
+  <table><thead><tr><th>Item</th><th>Qtde.</th><th>Und.</th><th>Descrição do material ou serviço</th><th>Marca</th><th>Valor unit.</th><th>Valor total</th></tr></thead><tbody>${items.map(item=>'<tr>'+[item.codigo,item.quantidade,item.unidade,printedDescription(item),item.marca,money.format(price(item)),money.format(total([item]))].map(value=>'<td>'+escape(value)+'</td>').join('')+'</tr>').join('')}</tbody></table>
+  <p><strong>Valor total da proposta: ${money.format(total(items))}</strong></p><footer>Gerado pelo E-Lementar Licitações</footer></html>`;
+}
+
+function printProposal(row,items) {
+  const frame = document.createElement('iframe');
+  frame.title = 'Proposta comercial para impressão';
+  frame.style.cssText = 'position:fixed;width:1px;height:1px;border:0;bottom:0';
+  frame.onload = ()=>{
+    frame.contentWindow.addEventListener('afterprint',()=>frame.remove(),{once:true});
+    frame.contentWindow.print();
+  };
+  frame.srcdoc = proposalHtml(row,items,db.empresas.find(company=>company.id===row.empresa_id));
+  document.body.append(frame);
+}
+
+const importColumns = ['ITEM','QTD','UND','DESCRICAO_EDITAL','MARCA','CUSTO','MARGEM','FORNECEDOR','OBSERVACAO','CODIGO_CATALOGO','DESCRICAO_NA_PROPOSTA'];
+function importProposalItems(row) {
+  edit('Importar itens da proposta',[['planilha','Planilha XML do Excel','file']],async ({planilha})=>{
+    if (!planilha.size || planilha.size > 2*1024*1024) throw new Error('Selecione uma planilha XML de até 2 MB.');
+    const xml = new DOMParser().parseFromString(await planilha.text(),'application/xml');
+    const ns = 'urn:schemas-microsoft-com:office:spreadsheet';
+    const table = xml.getElementsByTagNameNS(ns,'Table')[0];
+    if (xml.querySelector('parsererror') || !table) throw new Error('Use o modelo XML de itens.');
+    const lines = [...table.getElementsByTagNameNS(ns,'Row')].map(line=>{
+      const cells = [];
+      for (const cell of line.getElementsByTagNameNS(ns,'Cell')) {
+        const index = Number(cell.getAttributeNS(ns,'Index') || cells.length+1);
+        if (!Number.isInteger(index) || index<=cells.length || index>importColumns.length) throw new Error('A planilha contém colunas fora do modelo.');
+        cells[index-1] = cell.textContent.trim();
+      }
+      return Array.from({length:importColumns.length},(_,index)=>cells[index]??'');
+    });
+    if (lines.shift()?.join('|') !== importColumns.join('|')) throw new Error('Mantenha os nomes e a ordem das colunas do modelo.');
+    const seen = new Set();
+    const items = [];
+    for (const [index,cells] of lines.entries()) {
+      if (!cells.some(Boolean)) continue;
+      const [codigo,quantidade,unidade,descricao,marca_item,custo_embalagem,margem,fornecedor,observacao_item,catalogCode,source] = cells;
+      try {
+        if (seen.has(codigo)) throw new Error('Número de item duplicado na planilha.');
+        const product = db.catalogo.find(entry=>entry.codigo===catalogCode);
+        if (catalogCode && !product) throw new Error('Código do catálogo não localizado: '+catalogCode);
+        const origem_descricao = source.toLowerCase() || 'edital';
+        if (!['edital','interna'].includes(origem_descricao)) throw new Error('Use edital ou interna na origem da descrição.');
+        items.push(proposalItem(row,{codigo,quantidade,unidade,descricao,marca_item,custo_embalagem,margem,fornecedor,
+          observacao_item,embalagem:'1',produto_catalogo:product?.id,origem_descricao}));
+        seen.add(codigo);
+      } catch(error) { throw new Error('Linha '+(index+2)+': '+error.message); }
+    }
+    if (!items.length) throw new Error('Inclua pelo menos um item.');
+    if (client) {
+      const {error} = await client.from('itens').insert(items.map(item=>({...item,grupo_id:group})));
+      if (error) throw error;
+      await load();
+    } else {
+      const updated = [...db.itens,...items.map(item=>({...item,id:crypto.randomUUID()}))];
+      localStorage.setItem(localKey,JSON.stringify({...db,itens:updated}));
+      db.itens = updated;
+    }
+  },{decorate:form=>{form.elements.namedItem('planilha').accept='.xml,text/xml,application/xml';}});
+}
+
 function renderProposal(view,row) {
   const rows = db.itens.filter(x=>x.edital_id===row.id);
   const docs = db.documentos.filter(x=>x.edital_id===row.id);
   const section = panel(view,'<h2>Proposta · '+escape(row.numero)+'</h2><p>'+escape(row.orgao)+' · '+escape(db.empresas.find(e=>e.id===row.empresa_id)?.nome)+'</p><p>Total estimado <strong>'+money.format(total(rows))+'</strong></p>');
-  if (row.status==='Aprovado') writeAction('Adicionar item',()=>item(row),section,true);
+  if (row.status==='Aprovado') {
+    writeAction('Adicionar item',()=>item(row),section,true);
+    writeAction('Importar planilha XML',()=>importProposalItems(row),section);
+    if (canWrite()) section.insertAdjacentHTML('beforeend',' <a href="./modelo-itens-proposta.xml" download>Baixar modelo XML</a>');
+  }
+  if (rows.length && row.empresa_id) action('Imprimir proposta',()=>printProposal(row,rows),section);
   const table = document.createElement('div');
   table.className = 'scroll';
-  table.innerHTML = '<table><thead><tr><th>Item</th><th>Descrição</th><th>Qtde.</th><th>Custo unitário</th><th>Preço proposto</th><th>Total</th><th>Ações</th></tr></thead><tbody></tbody></table>';
+  table.innerHTML = '<table><thead><tr><th>Item</th><th>Descrição</th><th>Qtde.</th><th>Und.</th><th>Marca</th><th>Custo unitário</th><th>Margem</th><th>Fornecedor</th><th>Observação</th><th>Preço proposto</th><th>Total</th><th>Ações</th></tr></thead><tbody></tbody></table>';
   section.append(table);
   for (const entry of rows) {
     const tr = table.querySelector('tbody').insertRow();
-    for (const value of [entry.codigo,entry.descricao,entry.quantidade,(entry.custo_embalagem/entry.embalagem).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:4}),money.format(price(entry)),money.format(total([entry]))]) tr.insertCell().textContent=value;
+    for (const value of [entry.codigo,printedDescription(entry),entry.quantidade,entry.unidade,entry.marca,(entry.custo_embalagem/entry.embalagem).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:4}),entry.margem+'%',entry.fornecedor,entry.observacao,money.format(price(entry)),money.format(total([entry]))]) tr.insertCell().textContent=value;
     const controls=tr.insertCell();
     if(row.status==='Aprovado') writeAction('Editar',()=>item(row,entry),controls);
   }
