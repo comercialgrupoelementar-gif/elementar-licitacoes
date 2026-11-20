@@ -591,8 +591,7 @@ async function moveProposal(row,destination) {
     const scope = {grupo_id:row.grupo_id,empresa_id:row.empresa_id,edital_id:row.id};
     const {data,error} = await client.from('anexos_proposta').select('arquivo_id').match(scope);
     if (error) throw error;
-    const items = db.itens.filter(item=>item.edital_id===row.id);
-    await downloadProposalPackage(row,items,scope,new Set(data.map(link=>link.arquivo_id)));
+    await downloadProposalPackage(row,scope,new Set(data.map(link=>link.arquivo_id)));
   }
 }
 
@@ -972,19 +971,26 @@ async function renderProposalHistory(view,row) {
   if (!section.isConnected) return;
   if (!data.length) section.append('Nenhuma movimentação registrada.');
   const date = new Intl.DateTimeFormat('pt-BR',{dateStyle:'short',timeStyle:'medium',timeZone:'America/Sao_Paulo'});
-  for (const entry of data) panel(section,'<strong>'+proposalStages[entry.origem]+' → '+proposalStages[entry.destino]+'</strong><p>'+escape(entry.responsavel)+' · '+date.format(new Date(entry.ocorrido_em))+' (Brasília)</p>');
+  const list = document.createElement('ul');
+  list.style.cssText = 'list-style:none;margin:4px 0 0;padding:0;font-size:9pt;line-height:1.3';
+  for (const entry of data) {
+    const item = document.createElement('li');
+    item.style.cssText = 'padding:3px 0;border-bottom:1px solid #e5e7eb;overflow-wrap:anywhere';
+    item.innerHTML = '<strong>'+proposalStages[entry.origem]+' → '+proposalStages[entry.destino]+'</strong> · '+escape(entry.responsavel)+' · '+date.format(new Date(entry.ocorrido_em))+' (Brasília)';
+    list.append(item);
+  }
+  section.append(list);
 }
 
-async function downloadProposalPackage(row,items,scope,selected) {
+async function downloadProposalPackage(row,scope,selected) {
   const {data,error} = await client.from('arquivos_empresa').select('id,nome,conteudo,validade')
     .match({grupo_id:scope.grupo_id,empresa_id:scope.empresa_id}).in('id',[...selected]);
   if (error) throw error;
   if (data.length !== selected.size) throw new Error('Um arquivo vinculado ficou indisponível.');
   if (data.some(documentExpired)) throw new Error('Há documentos vencidos. Volte para Vincular documentação e atualize a seleção.');
-  const empresa = db.empresas.find(entry=>entry.id===row.empresa_id);
-  const html = proposalHtml(row,items,empresa);
+  const signed = await readSignedProposal(row);
   const files = data.map((file,index)=>({name:'documentos/'+(index+1)+'-'+(file.nome.replace(/\.pdf$/i,'')+'.pdf').replace(/[^\p{L}\p{N} ._-]/gu,'_'),bytes:Uint8Array.from(atob(file.conteudo),character=>character.charCodeAt(0))}));
-  const zip = makeZip([{name:'proposta-inicial.html',bytes:new TextEncoder().encode(html)},...files]);
+  const zip = makeZip([{name:'proposta-inicial-assinada.pdf',bytes:pdfBytes(signed)},...files]);
   const url = URL.createObjectURL(zip);
   const link = document.createElement('a');
   link.href = url;
@@ -1025,7 +1031,7 @@ async function proposalAttachments(section,row,items) {
     },card);
   }
   if (proposalStage(row)===5 && items.length && selected.size) {
-    action('Baixar ZIP da proposta',()=>downloadProposalPackage(row,items,scope,selected),section,true);
+    action('Baixar ZIP da proposta',()=>downloadProposalPackage(row,scope,selected),section,true);
   }
 }
 
@@ -1066,32 +1072,112 @@ function groupProposalItems(items) {
   return groups;
 }
 
-function proposalHtml(row,items,empresa) {
-  const data = empresa?.dados_proposta ?? {};
-  const logo = /^data:image\/(png|jpeg);base64,[A-Za-z0-9+/=]+$/.test(data.logo??'') ? '<img alt="Logomarca da empresa" src="'+escape(data.logo)+'">' : '';
-  const identity = proposalIdentity.filter(([key])=>data[key]).map(([key,label])=>'<div><b>'+label+'</b> '+escape(data[key])+'</div>').join('');
-  return `<!doctype html><html lang="pt-BR"><meta charset="UTF-8"><title>Proposta comercial</title>
-  <style>body{font:13px system-ui;color:#202124;margin:32px}img{max-width:180px;max-height:90px}h1{font-size:20px}p{white-space:pre-wrap}table{width:100%;border-collapse:collapse}th,td{padding:7px;border:1px solid #aaa;text-align:left}thead{display:table-header-group}tr{break-inside:avoid}.identidade{display:grid;grid-template-columns:1fr 1fr;gap:4px 16px}footer{font-size:8px;color:#777;text-align:right;margin-top:24px}@media print{body{margin:0}}</style>
-  ${logo}<h1>PROPOSTA COMERCIAL</h1><div class="identidade"><div><b>Razão social</b> ${escape(empresa?.nome)}</div><div><b>CNPJ</b> ${escape(empresa?.cnpj)}</div>${identity}</div>
-  <p>À atenção do Setor de Licitações — ${escape(row.orgao)}</p>
-  <p><b>Processo</b> ${escape(row.numero)} · ${escape(row.modalidade)} ${escape(row.numero_pregao??'')}</p>
-  ${row.sessao?'<p><b>Data da sessão</b> '+escape(row.sessao.split('-').reverse().join('/'))+'</p>':''}
-  ${row.local_disputa?'<p><b>Local ou portal da disputa</b> '+escape(row.local_disputa)+'</p>':''}
-  <p><b>Objeto</b> ${escape(row.objeto)}</p>
-  ${[...groupProposalItems(items)].map(([lot,group])=>`<table><thead><tr><th>Lote</th><th>Item</th><th>Código interno</th><th>Qtde.</th><th>Und.</th><th>Descrição do material ou serviço</th><th>Marca</th><th>Valor unit.</th><th>Valor total</th></tr></thead><tbody>${group.map(item=>'<tr>'+[item.lote,item.codigo,catalogCode(item),item.quantidade,item.unidade,printedDescription(item),item.marca,money.format(price(item)),money.format(total([item]))].map(value=>'<td>'+escape(value)+'</td>').join('')+'</tr>').join('')}</tbody></table>${lot?'<p>Subtotal do lote '+escape(lot)+': '+money.format(total(group))+'</p>':''}`).join('')}
-  <p><strong>Valor total da proposta: ${money.format(total(items))}</strong></p><footer>Gerado pelo E-Lementar Licitações</footer></html>`;
+let pdfLibrary;
+async function proposalPdfLibrary() {
+  pdfLibrary ??= new Promise((resolve,reject)=>{
+    const script = document.createElement('script');
+    script.src = 'https://cdn.jsdelivr.net/npm/jspdf@4.2.1/dist/jspdf.umd.min.js';
+    script.onload = ()=>window.jspdf?.jsPDF ? resolve(window.jspdf.jsPDF) : reject(new Error('Gerador de PDF indisponível.'));
+    script.onerror = ()=>{ script.remove(); reject(new Error('Não foi possível carregar o gerador de PDF.')); };
+    document.head.append(script);
+  }).catch(error=>{ pdfLibrary = undefined; throw error; });
+  return pdfLibrary;
 }
 
-function printProposal(row,items) {
-  const frame = document.createElement('iframe');
-  frame.title = 'Proposta comercial para impressão';
-  frame.style.cssText = 'position:fixed;width:1px;height:1px;border:0;bottom:0';
-  frame.onload = ()=>{
-    frame.contentWindow.addEventListener('afterprint',()=>frame.remove(),{once:true});
-    frame.contentWindow.print();
-  };
-  frame.srcdoc = proposalHtml(row,items,db.empresas.find(company=>company.id===row.empresa_id));
-  document.body.append(frame);
+async function downloadProposalPdf(row,items) {
+  const Pdf = await proposalPdfLibrary();
+  const pdf = new Pdf({unit:'mm',format:'a4'});
+  const company = db.empresas.find(entry=>entry.id===row.empresa_id);
+  const identity = company?.dados_proposta ?? {};
+  let y = 16;
+  function space(height) {
+    if (y+height>277) { pdf.addPage(); y=16; }
+  }
+  function write(value,{size=10,bold=false}={}) {
+    pdf.setFont('helvetica',bold?'bold':'normal');
+    pdf.setFontSize(size);
+    const step = size*0.46;
+    for (const text of pdf.splitTextToSize(String(value??''),178)) {
+      space(step);
+      pdf.text(text,16,y);
+      y+=step;
+    }
+  }
+  if (/^data:image\/(png|jpeg);base64,/.test(identity.logo??'')) {
+    const image = pdf.getImageProperties(identity.logo);
+    const scale = Math.min(55/image.width,22/image.height);
+    pdf.addImage(identity.logo,image.fileType,16,y,image.width*scale,image.height*scale);
+    y+=image.height*scale+5;
+  }
+  write('PROPOSTA COMERCIAL',{size:17,bold:true});
+  write('Razão social: '+(company?.nome??''),{bold:true});
+  write('CNPJ: '+(company?.cnpj??''));
+  for (const [key,label] of proposalIdentity) if (identity[key]) write(label+': '+identity[key]);
+  y+=3;
+  write('À atenção do Setor de Licitações — '+row.orgao);
+  write('Processo: '+row.numero+' · '+row.modalidade+' '+(row.numero_pregao??''));
+  if (row.sessao) write('Data da sessão: '+row.sessao.split('-').reverse().join('/'));
+  if (row.local_disputa) write('Local ou portal da disputa: '+row.local_disputa);
+  write('Objeto: '+(row.objeto??''));
+  for (const [lot,entries] of groupProposalItems(items)) {
+    if (lot) { y+=3; write('Lote '+lot,{bold:true}); }
+    for (const item of entries) {
+      y+=3;
+      space(16);
+      const code = catalogCode(item);
+      write('Item '+item.codigo+(code?' · Código interno '+code:''),{bold:true});
+      write(printedDescription(item));
+      write([item.quantidade+' '+(item.unidade??''),item.marca,'Unitário: '+money.format(price(item)),'Total: '+money.format(total([item]))].filter(Boolean).join(' · '));
+    }
+    if (lot) write('Subtotal do lote: '+money.format(total(entries)),{bold:true});
+  }
+  y+=4;
+  write('Valor total da proposta: '+money.format(total(items)),{size:12,bold:true});
+  space(35);
+  y+=16;
+  pdf.line(16,y,103,y);
+  y+=5;
+  write(identity.signatario || company?.nome || 'Representante da empresa participante',{bold:true});
+  if (identity.cargo) write(identity.cargo);
+  write('Assinatura do representante');
+  for (let page=1;page<=pdf.getNumberOfPages();page++) {
+    pdf.setPage(page);
+    pdf.setFont('helvetica','normal');
+    pdf.setFontSize(7);
+    pdf.setTextColor(115);
+    pdf.text('Gerado pelo E-Lementar Licitações',194,289,{align:'right'});
+  }
+  pdf.save('proposta-'+row.numero.replace(/[^a-z0-9_-]/gi,'-')+'.pdf');
+}
+
+const pdfBytes = base64=>Uint8Array.from(atob(base64),character=>character.charCodeAt(0));
+
+async function readSignedProposal(row) {
+  const {data,error} = await client.from('propostas_assinadas').select('pdf').match({grupo_id:group,edital_id:row.id}).maybeSingle();
+  if (error) throw error;
+  if (!data) throw new Error('Volte à Conferência 02 e anexe o PDF assinado para gerar o ZIP.');
+  return data.pdf;
+}
+
+async function renderProposalSignature(view,row) {
+  const section = panel(view,'<h2>Assinatura da proposta</h2>');
+  const {data,error} = await client.from('propostas_assinadas').select('anexado_em').match({grupo_id:group,edital_id:row.id}).maybeSingle();
+  if (error) throw error;
+  if (!section.isConnected) return;
+  section.append(data?'PDF assinado anexado.':'Baixe o PDF da proposta. Assine digitalmente ou imprima, assine e digitalize. Em seguida, anexe o PDF assinado.');
+  if (data) action('Baixar PDF assinado',async()=>{
+    const url = URL.createObjectURL(new Blob([pdfBytes(await readSignedProposal(row))],{type:'application/pdf'}));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'proposta-assinada.pdf';
+    link.click();
+    setTimeout(()=>URL.revokeObjectURL(url),30000);
+  },section);
+  if (proposalStage(row)===4) writeAction(data?'Substituir PDF assinado':'Anexar PDF assinado',()=>edit('Anexar proposta assinada',
+    [['arquivo','Proposta assinada em PDF','file']],async ({arquivo})=>{
+      const {error} = await client.rpc('anexar_proposta_assinada',{p_edital:row.id,p_pdf:await encodePdf(arquivo)});
+      if (error) throw error;
+    },{decorate:form=>{form.elements.namedItem('arquivo').accept='.pdf,application/pdf';}}),section,true);
 }
 
 const importColumns = ['ITEM','QTD','UND','DESCRICAO_EDITAL','MARCA','CUSTO','MARGEM','FORNECEDOR','OBSERVACAO','CODIGO_CATALOGO','DESCRICAO_NA_PROPOSTA','LOTE'];
@@ -1212,12 +1298,13 @@ function renderProposal(view,row) {
   const section = panel(view,'<h2>Proposta · '+escape(row.numero)+'</h2><p>'+escape(row.orgao)+' · '+escape(db.empresas.find(e=>e.id===row.empresa_id)?.nome)+'</p><p>Total estimado <strong>'+money.format(total(rows))+'</strong></p>');
   section.insertAdjacentHTML('beforeend','<p>Etapa: <strong>'+proposalStages[proposalStage(row)]+'</strong></p>');
   proposalControls(section,row);
+  if (proposalStage(row)>=4 && client) renderProposalSignature(view,row).catch(error=>message(error.message));
   if (row.status==='Aprovado' && proposalStage(row)<3) {
     writeAction('Adicionar item',()=>item(row),section,true);
     writeAction('Importar planilha Excel',()=>importProposalItems(row),section);
     if (canWrite()) section.insertAdjacentHTML('beforeend',' <a href="./modelo-itens-proposta.xlsx" download>Baixar modelo Excel (.xlsx)</a>');
   }
-  if (rows.length && row.empresa_id) action('Imprimir proposta',()=>printProposal(row,rows),section);
+  if (rows.length && row.empresa_id) action('Baixar proposta em PDF',()=>downloadProposalPdf(row,rows),section);
   const table = document.createElement('div');
   table.className = 'scroll';
   table.innerHTML = '<table><thead><tr><th>Lote</th><th>Item</th><th>Código interno</th><th>Descrição</th><th>Qtde.</th><th>Und.</th><th>Marca</th><th>Custo unitário</th><th>Margem</th><th>Fornecedor</th><th>Observação</th><th>Preço proposto</th><th>Total</th><th>Ações</th></tr></thead><tbody></tbody></table>';
