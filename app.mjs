@@ -800,7 +800,79 @@ async function downloadQuote(row,format) {
   pdf.save(name+'.pdf');
 }
 
+function financialPrice(item) {
+  const base=Number(item.custo)+Number(item.imposto_compra_unitario ?? 0);
+  const rate=(Number(item.margem)+Number(item.imposto_venda_pct ?? 0))/100;
+  if (rate>=1 || !Number.isFinite(base+rate)) return null;
+  const calculated=Math.round((base/(1-rate)+Number.EPSILON)*100)/100;
+  return {base,calculated,final:item.preco_venda_manual==null?calculated:Number(item.preco_venda_manual)};
+}
+
+function editFinancialPrice(item) {
+  const keys=['custo','imposto_compra_unitario','imposto_venda_pct','margem','preco_venda_manual'];
+  edit('Ajustar preço · '+item.codigo,[
+    ['custo','Custo unitário sem os impostos adicionais (R$)','number',item.custo],
+    ['imposto_compra_unitario','Imposto da compra ainda fora do custo, por unidade (R$)','number',item.imposto_compra_unitario ?? 0],
+    ['imposto_venda_pct','Impostos sobre o preço de venda (%)','number',item.imposto_venda_pct ?? 0],
+    ['margem','Margem desejada sobre a venda (%)','number',item.margem],
+    ['preco_venda_manual','Preço de venda manual (R$)','number',item.preco_venda_manual]
+  ],async values=>{
+    const fields=Object.fromEntries(keys.map(key=>[key,key==='preco_venda_manual' && values[key]===''?null:Number(values[key])]));
+    for (const key of keys) {
+      const value=fields[key];
+      if (value!==null && (!Number.isFinite(value) || value<0 || value>=1e10)) throw new Error('Confira os valores informados.');
+    }
+    if (fields.margem+fields.imposto_venda_pct>=100) throw new Error('A soma da margem e dos impostos sobre a venda deve ser menor que 100%.');
+    if (!client) return save('catalogo',fields,item.id);
+    let request=client.from('catalogo').update(fields).match({id:item.id,grupo_id:group});
+    for (const key of keys) request=item[key]==null?request.is(key,null):request.eq(key,item[key]);
+    const {data,error}=await request.select('id').maybeSingle();
+    if (error) throw error;
+    if (!data) throw new Error('O item foi alterado. Reabra o Financeiro para conferir os dados atualizados.');
+    await load();
+  },{decorate:form=>{
+    form.elements.namedItem('preco_venda_manual').required=false;
+    const preview=document.createElement('p');
+    preview.setAttribute('role','status');
+    form.prepend(item.descricao);
+    form.lastElementChild.before(preview);
+    function update() {
+      const values=Object.fromEntries(new FormData(form));
+      if (values.preco_venda_manual==='') values.preco_venda_manual=null;
+      const result=financialPrice(values);
+      preview.textContent=result?'Custo com imposto da compra '+money.format(result.base)+' · Preço calculado '+money.format(result.calculated)+' · Preço de venda '+money.format(result.final):'A soma da margem e dos impostos sobre a venda deve ser menor que 100%.';
+    }
+    form.addEventListener('input',update);
+    update();
+  }});
+}
+
+function renderFinancialPrices(view) {
+  const section=panel(view,'<h2>Formação de preço por item</h2><label>Buscar produto ou serviço<input type="search" placeholder="Código ou descrição"></label>');
+  const search=section.querySelector('input');
+  const table=quoteTable(section,['Produto ou serviço','Custo base','Imposto na compra','Impostos na venda','Margem','Preço calculado','Preço de venda','Ação']);
+  const draw=()=>{
+    table.replaceChildren();
+    for (const item of db.catalogo) {
+      if (!normalizeSearch(item.codigo+' '+item.descricao).includes(normalizeSearch(search.value.trim()))) continue;
+      const result=financialPrice(item);
+      const line=table.insertRow();
+      for (const value of [item.codigo+' · '+item.descricao,money.format(item.custo),money.format(item.imposto_compra_unitario ?? 0),(item.imposto_venda_pct ?? 0)+'%',item.margem+'%',result?money.format(result.calculated):'—',result?money.format(result.final)+(item.preco_venda_manual==null?'':' · manual'):'—']) line.insertCell().textContent=value;
+      const cell=line.insertCell();
+      writeAction('Ajustar preço',()=>editFinancialPrice(item),cell);
+    }
+    if (!table.rows.length) {
+      const cell=table.insertRow().insertCell();
+      cell.colSpan=8;
+      cell.textContent='Nenhum produto ou serviço encontrado.';
+    }
+  };
+  search.oninput=draw;
+  draw();
+}
+
 function renderQuoteFinance(view) {
+  renderFinancialPrices(view);
   const section=panel(view,'<h2>Preços recebidos de fornecedores</h2><p>Compare o preço recebido com o custo do catálogo antes de aplicar.</p>');
   const received=db.cotacoes.filter(row=>row.etapa===2).flatMap(row=>row.itens.filter(item=>item.preco!=null).map(item=>({row,item})));
   if (!received.length) { section.append('Nenhum preço recebido registrado em cotações enviadas.'); return; }
