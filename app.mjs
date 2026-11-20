@@ -1058,27 +1058,94 @@ function openDispute(view,row) {
       const floor=grouped.reduce((sum,item)=>sum+bidFloor(unitCost(item),record.margem_minima)*item.quantidade,0);
       section.insertAdjacentHTML('beforeend','<h3>Lote '+escape(lot)+' · Piso total '+money.format(floor)+'</h3>');
     }
-    const table=quoteTable(section,['Item','Descrição','Qtd.','Custo unit.','Proposta inicial','Piso unit.','Lance sugerido','Nosso lance','Margem e farol','Liderança','Resultado','Preço vencedor','Total vencedor','Auditoria','Ação']);
+    const table=quoteTable(section,['Item','Descrição','Qtd.','Custo unit.','Proposta inicial','Piso unit.','Margem (%)','Lance sugerido','Farol da margem','Nosso lance','Liderança','Resultado','Fornecedor vencedor','Preço vencedor','Total vencedor','Auditoria','Ação']);
     for(const item of grouped) {
       const result=record.resultados[item.id]??{};
       const cost=unitCost(item);
       const floor=bidFloor(cost,record.margem_minima);
-      const suggested=bidFloor(cost,result.margem??item.margem);
-      const margin=bidMargin(cost,result.lance??suggested);
-      const color=margin==null?'':margin+1e-8<record.margem_minima?'Vermelho':margin<=Number(record.margem_minima)+Number(record.alerta)+1e-8?'Amarelo':'Verde';
+      const initialMargin=result.margem??item.margem;
       const final=result.preco_final==null?null:roundPrice(result.preco_final*item.quantidade);
       const audit=result.situacao==='Ganhamos'&&result.preco_final<floor?'Ganho abaixo do mínimo':result.situacao==='Perdemos'&&result.preco_final>=floor?'Perdido acima do mínimo':'—';
       if(result.situacao==='Ganhamos') {won++;wonTotal+=final??0;}
       const leader=result.situacao==='Estamos liderando'?'Nossa empresa':[result.concorrente,result.lance_concorrente==null?'':money.format(result.lance_concorrente)].filter(Boolean).join(' · ');
-      const outcome=[result.situacao,result.situacao==='Ganhamos'?db.empresas.find(e=>e.id===row.empresa_id)?.nome:result.vencedor,result.marca_vencedora,result.observacao].filter(Boolean).join(' · ');
+      const company=db.empresas.find(e=>e.id===row.empresa_id)?.nome||'Nossa empresa';
       const tr=table.insertRow();
-      for(const value of [item.codigo,printedDescription(item),decimal.format(item.quantidade),money.format(cost),money.format(price(item)),money.format(floor),money.format(suggested),result.lance==null?'—':money.format(result.lance)]) tr.insertCell().textContent=value;
+      for(const value of [item.codigo,printedDescription(item),decimal.format(item.quantidade),money.format(cost),money.format(price(item)),money.format(floor)]) tr.insertCell().textContent=value;
+      const marginCell=tr.insertCell();
+      const suggestion=tr.insertCell();
       const signal=tr.insertCell();
-      signal.textContent=color?color+' · '+decimal.format(margin)+'%':'—';
-      if(color) signal.style.backgroundColor={Vermelho:'#fee2e2',Amarelo:'#fef3c7',Verde:'#dcfce7'}[color];
-      for(const value of [leader||'—',outcome||'Sem resultado',result.preco_final==null?'—':money.format(result.preco_final),final==null?'—':money.format(final),audit]) tr.insertCell().textContent=value;
-      const cell=tr.insertCell();
-      if(page==='disputa' && record.etapa===1) writeAction('Lance e resultado',()=>editDisputeItem(view,row,record,item),cell);
+      tr.insertCell().textContent=result.lance==null?'—':money.format(result.lance)+' · '+decimal.format(bidMargin(cost,result.lance))+'%';
+      tr.insertCell().textContent=leader||'—';
+      const outcome=tr.insertCell();
+      const winner=tr.insertCell();
+      const finalPrice=tr.insertCell();
+      const finalTotal=tr.insertCell();
+      const auditCell=tr.insertCell();
+      auditCell.textContent=audit;
+      const controls=tr.insertCell();
+      function preview(margin) {
+        const valid=margin!==null && margin>=0 && margin<100;
+        const color=!valid?'':margin<record.margem_minima?'Vermelho':margin<=Number(record.margem_minima)+Number(record.alerta)?'Amarelo':'Verde';
+        suggestion.textContent=valid?money.format(bidFloor(cost,margin)):'—';
+        signal.textContent=color?color+' · '+decimal.format(margin)+'%':'—';
+        signal.style.backgroundColor=color?{Vermelho:'#fee2e2',Amarelo:'#fef3c7',Verde:'#dcfce7'}[color]:'';
+      }
+      preview(Number(initialMargin));
+      finalTotal.textContent=final==null?'—':money.format(final);
+      if(page!=='disputa' || record.etapa!==1 || !canWrite()) {
+        marginCell.textContent=decimal.format(initialMargin);
+        outcome.textContent=result.situacao||'Sem resultado';
+        winner.textContent=result.situacao==='Ganhamos'?company:result.vencedor||'—';
+        finalPrice.textContent=result.preco_final==null?'—':money.format(result.preco_final);
+        continue;
+      }
+      const makeInput=(cell,label,type,value)=>{
+        const input=document.createElement('input');
+        input.type=type;
+        input.value=value??'';
+        input.setAttribute('aria-label',label+' do item '+item.codigo);
+        input.style.minWidth=type==='number'?'88px':'145px';
+        if(type==='number') {input.step='0.0001';input.min='0';}
+        cell.append(input);
+        return input;
+      };
+      const margin=makeInput(marginCell,'Margem','number',initialMargin);
+      const status=document.createElement('select');
+      status.setAttribute('aria-label','Resultado do item '+item.codigo);
+      status.style.minWidth='144px';
+      for(const entry of disputeResults) status.add(new Option(entry,entry));
+      status.value=result.situacao??disputeResults[0];
+      outcome.append(status);
+      const supplier=makeInput(winner,'Fornecedor vencedor','text',result.vencedor);
+      const amount=makeInput(finalPrice,'Preço vencedor','number',result.preco_final);
+      let externalWinner=result.vencedor??'';
+      function updateOutcome() {
+        const own=status.value==='Ganhamos';
+        supplier.disabled=status.value!=='Perdemos';
+        supplier.value=own?company:status.value==='Perdemos'?externalWinner:'';
+        const number=Number(amount.value);
+        finalTotal.textContent=number>0?money.format(roundPrice(number*item.quantidade)):'—';
+      }
+      supplier.oninput=()=>{externalWinner=supplier.value;};
+      status.onchange=updateOutcome;
+      amount.oninput=updateOutcome;
+      margin.oninput=()=>preview(margin.value===''?null:Number(margin.value));
+      updateOutcome();
+      const saveLine=action('Salvar item',async()=>{
+        const value=Number(margin.value);
+        const preco_final=amount.value===''?null:Number(amount.value);
+        if(margin.value==='' || !margin.checkValidity() || value>=100) throw new Error('Informe uma margem de 0 a menos de 100%, com até quatro casas decimais.');
+        if((preco_final!==null && (!amount.checkValidity() || preco_final<=0)) || (['Ganhamos','Perdemos'].includes(status.value) && preco_final==null)) throw new Error('Informe o preço vencedor maior que zero.');
+        if(status.value==='Perdemos' && !supplier.value.trim()) throw new Error('Informe o fornecedor vencedor.');
+        saveLine.disabled=true;
+        try {
+          const latest=db.disputas.find(entry=>entry.id===record.id);
+          await saveDispute(row,latest,{resultados:{...latest.resultados,[item.id]:{...latest.resultados[item.id],margem:value,situacao:status.value,
+            vencedor:status.value==='Perdemos'?supplier.value.trim():'',preco_final}}});
+          openDispute(view,row);
+        } finally {saveLine.disabled=false;}
+      },controls);
+      action('Outros dados do lance',()=>editDisputeItem(view,row,record,item),controls);
     }
   }
   section.insertAdjacentHTML('beforeend','<p><strong>Itens ganhos: '+won+' · Total ganho: '+money.format(wonTotal)+'</strong></p>');
