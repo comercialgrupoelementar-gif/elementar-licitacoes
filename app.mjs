@@ -121,7 +121,7 @@ async function load() {
     return;
   }
   const responses = await Promise.all(allTables.map(table => client.from(table).select(table === 'editais'
-    ? 'id,grupo_id,empresa_id,numero,numero_pregao,orgao,modalidade,sessao,status,parecer,edital_url,local_disputa,edital_pdf_nome,objeto'
+    ? 'id,grupo_id,empresa_id,numero,numero_pregao,orgao,modalidade,sessao,status,parecer,edital_url,local_disputa,edital_pdf_nome,objeto,modo_disputa'
     : '*').eq('grupo_id',group)));
   const missing = new Set();
   responses.forEach(({error},i) => {
@@ -298,6 +298,7 @@ function edital(row = {}) {
     ['numero_pregao','Número do pregão','text',row.numero_pregao],
     ['orgao','Órgão comprador','select','',[]],
     ['modalidade','Modalidade ou procedimento','select',row.modalidade ?? modalities[0],modalities],
+    ['modo_disputa','Forma de disputa','select',row.modo_disputa??'item',[['item','Por item'],['lote','Por lote']]],
     ['objeto','Objeto da contratação','textarea',row.objeto],
     ['edital_url','Link da publicação do edital','url',row.edital_url],
     ['local_disputa','Local ou portal da disputa','text',row.local_disputa],
@@ -318,6 +319,7 @@ function edital(row = {}) {
       throw new Error('Informe o número do pregão.');
     }
     const {edital_pdf:file,...data} = values;
+    if (row.id && values.modo_disputa !== (row.modo_disputa??'item') && db.itens.some(item=>item.edital_id===row.id)) throw new Error('A forma de disputa só pode ser alterada antes de cadastrar os itens.');
     data.objeto = data.objeto.trim();
     if (!data.objeto && (!row.id || row.objeto)) throw new Error('Informe o objeto da contratação.');
     const editalUrl = data.edital_url.trim();
@@ -457,6 +459,7 @@ function renderRegistry(view, agencies) {
 function item(row, previous = {}) {
   edit(previous.id ? 'Editar item da proposta' : 'Novo item da proposta',[
     ['produto_catalogo','Vincular produto ou serviço do catálogo','select','',[]],
+    ...(row.modo_disputa==='lote' ? [['lote','Número do lote','text',previous.lote]] : []),
     ['codigo','Número do item','text',previous.codigo],
     ['descricao','Descrição do edital','textarea',previous.descricao],
     ['origem_descricao','Descrição que sai na proposta','select',previous.usar_descricao_interna?'interna':'edital',[['edital','Descrição do edital'],['interna','Descrição interna da empresa']]],
@@ -497,10 +500,12 @@ function proposalItem(row, values, previous = {}) {
   if (!Object.keys(numbers).every(key=>String(values[key]).trim() && Number.isFinite(numbers[key])) || numbers.quantidade<=0 || numbers.embalagem<=0 || numbers.custo_embalagem<0 || numbers.margem<0 || numbers.margem>=100) {
     throw new Error('Confira quantidade, embalagem, custo e margem. A margem deve ser menor que 100%.');
   }
-  if (db.itens.some(item=>item.edital_id===row.id && item.codigo===codigo && item.id!==previous.id)) throw new Error('Número de item já cadastrado nesta proposta.');
+  const lote = (values.lote??'').trim();
+  if (row.modo_disputa==='lote' ? !lote : lote) throw new Error(row.modo_disputa==='lote'?'Informe o número do lote.':'Deixe o lote vazio na disputa por item.');
+  if (db.itens.some(item=>item.edital_id===row.id && (item.lote??'')===lote && item.codigo===codigo && item.id!==previous.id)) throw new Error('Número de item já cadastrado nesta proposta.');
   const usar_descricao_interna = values.origem_descricao === 'interna';
   if (usar_descricao_interna && !entry?.descricao) throw new Error('Vincule um produto do catálogo para usar a descrição interna.');
-  return {...numbers,codigo,descricao,unidade,edital_id:row.id,catalogo_id:entry?.id??null,
+  return {...numbers,lote,codigo,descricao,unidade,edital_id:row.id,catalogo_id:entry?.id??null,
     descricao_interna:entry?.id===previous.catalogo_id ? previous.descricao_interna??entry?.descricao??null : entry?.descricao??null,
     usar_descricao_interna,marca:values.marca_item.trim(),fornecedor:values.fornecedor.trim(),observacao:values.observacao_item.trim()};
 }
@@ -1005,6 +1010,16 @@ function companyProposalSettings(company) {
   },{decorate:form=>form.querySelectorAll('input').forEach(field=>field.required=false)});
 }
 
+function groupProposalItems(items) {
+  const groups = new Map();
+  for (const item of items) {
+    const lot = item.lote ?? '';
+    if (!groups.has(lot)) groups.set(lot,[]);
+    groups.get(lot).push(item);
+  }
+  return groups;
+}
+
 function proposalHtml(row,items,empresa) {
   const data = empresa?.dados_proposta ?? {};
   const logo = /^data:image\/(png|jpeg);base64,[A-Za-z0-9+/=]+$/.test(data.logo??'') ? '<img alt="Logomarca da empresa" src="'+escape(data.logo)+'">' : '';
@@ -1017,7 +1032,7 @@ function proposalHtml(row,items,empresa) {
   ${row.sessao?'<p><b>Data da sessão</b> '+escape(row.sessao.split('-').reverse().join('/'))+'</p>':''}
   ${row.local_disputa?'<p><b>Local ou portal da disputa</b> '+escape(row.local_disputa)+'</p>':''}
   <p><b>Objeto</b> ${escape(row.objeto)}</p>
-  <table><thead><tr><th>Item</th><th>Código interno</th><th>Qtde.</th><th>Und.</th><th>Descrição do material ou serviço</th><th>Marca</th><th>Valor unit.</th><th>Valor total</th></tr></thead><tbody>${items.map(item=>'<tr>'+[item.codigo,catalogCode(item),item.quantidade,item.unidade,printedDescription(item),item.marca,money.format(price(item)),money.format(total([item]))].map(value=>'<td>'+escape(value)+'</td>').join('')+'</tr>').join('')}</tbody></table>
+  ${[...groupProposalItems(items)].map(([lot,group])=>`<table><thead><tr><th>Lote</th><th>Item</th><th>Código interno</th><th>Qtde.</th><th>Und.</th><th>Descrição do material ou serviço</th><th>Marca</th><th>Valor unit.</th><th>Valor total</th></tr></thead><tbody>${group.map(item=>'<tr>'+[item.lote,item.codigo,catalogCode(item),item.quantidade,item.unidade,printedDescription(item),item.marca,money.format(price(item)),money.format(total([item]))].map(value=>'<td>'+escape(value)+'</td>').join('')+'</tr>').join('')}</tbody></table>${lot?'<p>Subtotal do lote '+escape(lot)+': '+money.format(total(group))+'</p>':''}`).join('')}
   <p><strong>Valor total da proposta: ${money.format(total(items))}</strong></p><footer>Gerado pelo E-Lementar Licitações</footer></html>`;
 }
 
@@ -1033,7 +1048,7 @@ function printProposal(row,items) {
   document.body.append(frame);
 }
 
-const importColumns = ['ITEM','QTD','UND','DESCRICAO_EDITAL','MARCA','CUSTO','MARGEM','FORNECEDOR','OBSERVACAO','CODIGO_CATALOGO','DESCRICAO_NA_PROPOSTA'];
+const importColumns = ['ITEM','QTD','UND','DESCRICAO_EDITAL','MARCA','CUSTO','MARGEM','FORNECEDOR','OBSERVACAO','CODIGO_CATALOGO','DESCRICAO_NA_PROPOSTA','LOTE'];
 const catalogColumns = ['DESCRICAO','TIPO','UNIDADE','MARCA','DETALHES','OBSERVACAO','CUSTO','MARGEM'];
 const catalogCode = item=>db.catalogo.find(entry=>entry.id===item.catalogo_id)?.codigo??'';
 
@@ -1096,22 +1111,24 @@ function importProposalItems(row) {
     if (!planilha.size || planilha.size > 2*1024*1024) throw new Error('Selecione uma planilha de até 2 MB.');
     const isExcel = /\.xlsx$/i.test(planilha.name);
     const lines = isExcel ? await readExcelItems(planilha) : readXmlItems(await planilha.text());
-    if (lines.shift()?.join('|') !== importColumns.join('|')) throw new Error('Mantenha os nomes e a ordem das colunas do modelo.');
+    const header = lines.shift()?.join('|');
+    if (header !== importColumns.join('|') && !(row.modo_disputa!=='lote' && header===importColumns.slice(0,-1).join('|'))) throw new Error('Mantenha os nomes e a ordem das colunas do modelo.');
     const seen = new Set();
     const items = [];
     for (const [index,cells] of lines.entries()) {
       if (!cells.some(Boolean)) continue;
-      const [codigo,quantidade,unidade,descricao,marca_item,custo_embalagem,margem,fornecedor,observacao_item,catalogCode,source] = importColumns.map((_,column)=>cells[column]??'');
+      const [codigo,quantidade,unidade,descricao,marca_item,custo_embalagem,margem,fornecedor,observacao_item,catalogCode,source,lote] = importColumns.map((_,column)=>cells[column]??'');
       try {
         if (cells.slice(importColumns.length).some(Boolean)) throw new Error('Remova as colunas extras.');
-        if (seen.has(codigo)) throw new Error('Número de item duplicado na planilha.');
+        const key = JSON.stringify([lote,codigo]);
+        if (seen.has(key)) throw new Error('Número de item duplicado na planilha.');
         const product = db.catalogo.find(entry=>entry.codigo===catalogCode);
         if (catalogCode && !product) throw new Error('Código do catálogo não localizado: '+catalogCode);
         const origem_descricao = source.toLowerCase() || 'edital';
         if (!['edital','interna'].includes(origem_descricao)) throw new Error('Use edital ou interna na origem da descrição.');
-        items.push(proposalItem(row,{codigo,quantidade,unidade,descricao,marca_item,custo_embalagem,margem,fornecedor,
+        items.push(proposalItem(row,{lote,codigo,quantidade,unidade,descricao,marca_item,custo_embalagem,margem,fornecedor,
           observacao_item,embalagem:'1',produto_catalogo:product?.id,origem_descricao}));
-        seen.add(codigo);
+        seen.add(key);
       } catch(error) { throw new Error('Linha '+(index+2)+': '+error.message); }
     }
     if (!items.length) throw new Error('Inclua pelo menos um item.');
@@ -1155,11 +1172,11 @@ function renderProposal(view,row) {
   if (rows.length && row.empresa_id) action('Imprimir proposta',()=>printProposal(row,rows),section);
   const table = document.createElement('div');
   table.className = 'scroll';
-  table.innerHTML = '<table><thead><tr><th>Item</th><th>Código interno</th><th>Descrição</th><th>Qtde.</th><th>Und.</th><th>Marca</th><th>Custo unitário</th><th>Margem</th><th>Fornecedor</th><th>Observação</th><th>Preço proposto</th><th>Total</th><th>Ações</th></tr></thead><tbody></tbody></table>';
+  table.innerHTML = '<table><thead><tr><th>Lote</th><th>Item</th><th>Código interno</th><th>Descrição</th><th>Qtde.</th><th>Und.</th><th>Marca</th><th>Custo unitário</th><th>Margem</th><th>Fornecedor</th><th>Observação</th><th>Preço proposto</th><th>Total</th><th>Ações</th></tr></thead><tbody></tbody></table>';
   section.append(table);
   for (const entry of rows) {
     const tr = table.querySelector('tbody').insertRow();
-    for (const value of [entry.codigo,catalogCode(entry),printedDescription(entry),entry.quantidade,entry.unidade,entry.marca,(entry.custo_embalagem/entry.embalagem).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:4}),entry.margem+'%',entry.fornecedor,entry.observacao,money.format(price(entry)),money.format(total([entry]))]) tr.insertCell().textContent=value;
+    for (const value of [entry.lote,entry.codigo,catalogCode(entry),printedDescription(entry),entry.quantidade,entry.unidade,entry.marca,(entry.custo_embalagem/entry.embalagem).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:4}),entry.margem+'%',entry.fornecedor,entry.observacao,money.format(price(entry)),money.format(total([entry]))]) tr.insertCell().textContent=value;
     const controls=tr.insertCell();
     if(row.status==='Aprovado') writeAction('Editar',()=>item(row,entry),controls);
   }
