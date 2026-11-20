@@ -11,7 +11,7 @@ const byId = id => document.getElementById(id);
 const escape = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const message = text => { byId('notice').textContent = text; };
 const tables = ['empresas','editais','itens','documentos'];
-const registryTables = ['orgaos_compradores','catalogo','cotacoes'];
+const registryTables = ['orgaos_compradores','catalogo','cotacoes','disputas'];
 const allTables = [...tables,...registryTables];
 const db = Object.fromEntries(allTables.map(table => [table,[]]));
 const unavailableRegistries = new Set();
@@ -946,6 +946,174 @@ function renderQuoteFinance(view) {
   }
 }
 
+const disputeStages=['Aguardando disputa','Em disputa','Enviado para acompanhamento'];
+const disputeResults=['Sem resultado','Estamos liderando','Concorrente liderando','Ganhamos','Perdemos','Sem vencedor'];
+const disputeFinal=s=>disputeResults.slice(3).includes(s);
+const unitCost=item=>Number(item.custo_embalagem)/Number(item.embalagem);
+const bidFloor=(cost,margin)=>Math.ceil((cost/(1-margin/100)-1e-9)*100)/100;
+const bidMargin=(cost,bid)=>bid>0?(1-cost/bid)*100:null;
+const disputeItems=row=>db.itens.filter(item=>item.edital_id===row.id);
+
+async function saveDispute(row,record,values) {
+  if (!record.id) return save('disputas',{edital_id:row.id,...values});
+  const {data,error}=await client.from('disputas').update(values).match({grupo_id:group,id:record.id,revisao:record.revisao}).select('id').maybeSingle();
+  if(error) throw error;
+  if(!data) throw new Error('A disputa mudou em outra sessão. Atualize a tela e tente novamente.');
+  await load();
+}
+
+async function moveDispute(row,record,destination) {
+  if(Math.abs(record.etapa-destination)!==1) throw new Error('Mova a disputa uma coluna por vez.');
+  if(destination===2 && (!disputeItems(row).length || disputeItems(row).some(item=>!disputeFinal(record.resultados[item.id]?.situacao)))) throw new Error('Registre o resultado final de todos os itens antes de enviar.');
+  if(!record.id) {
+    await saveDispute(row,record,{});
+    record=db.disputas.find(entry=>entry.edital_id===row.id);
+  }
+  await saveDispute(row,record,{etapa:destination});
+}
+
+function disputeRules(view,row,record) {
+  edit('Configurar farol de margens',[
+    ['margem_minima','Margem mínima sobre a venda (%)','number',record.margem_minima],
+    ['alerta','Faixa amarela acima da mínima (pontos percentuais)','number',record.alerta]
+  ],async values=>{
+    const margem_minima=Number(values.margem_minima),alerta=Number(values.alerta);
+    if(!Number.isFinite(margem_minima+alerta)||margem_minima<0||alerta<0||margem_minima+alerta>=100) throw new Error('A margem mínima e a faixa de alerta devem somar menos de 100%.');
+    await saveDispute(row,record,{margem_minima,alerta});
+  },{onSaved:()=>openDispute(view,row)});
+}
+
+function editDisputeItem(view,row,record,item) {
+  const saved=record.resultados[item.id]??{};
+  edit('Lance e resultado · Item '+item.codigo,[
+    ['margem','Margem para simular lance (%)','number',saved.margem??item.margem],
+    ['lance','Nosso lance unitário (R$)','number',saved.lance],
+    ['concorrente','Concorrente líder','text',saved.concorrente],
+    ['lance_concorrente','Melhor lance concorrente (R$)','number',saved.lance_concorrente],
+    ['situacao','Situação do item','select',saved.situacao??disputeResults[0],disputeResults],
+    ['vencedor','Vencedor, se for outra empresa','text',saved.vencedor],
+    ['marca_vencedora','Marca vencedora','text',saved.marca_vencedora],
+    ['preco_final','Preço vencedor unitário (R$)','number',saved.preco_final],
+    ['observacao','Justificativa ou observação','textarea',saved.observacao]
+  ],async values=>{
+    const result={...values,margem:Number(values.margem)};
+    if(!Number.isFinite(result.margem)||result.margem<0||result.margem>=100) throw new Error('Informe uma margem de 0 a menos de 100%.');
+    if(!disputeResults.includes(result.situacao)) throw new Error('Informe uma situação válida.');
+    for(const key of ['lance','lance_concorrente','preco_final']) {
+      result[key]=values[key]===''?null:Number(values[key]);
+      if(result[key]!==null && (!Number.isFinite(result[key])||result[key]<=0)) throw new Error('Informe valores unitários maiores que zero.');
+    }
+    if(['Ganhamos','Perdemos'].includes(result.situacao) && result.preco_final==null) throw new Error('Informe o preço vencedor.');
+    if(result.situacao==='Perdemos' && !result.vencedor.trim()) throw new Error('Informe o nome do vencedor.');
+    await saveDispute(row,record,{resultados:{...record.resultados,[item.id]:result}});
+  },{onSaved:()=>openDispute(view,row),decorate:form=>{
+    for(const key of ['lance','concorrente','lance_concorrente','vencedor','marca_vencedora','preco_final']) form.elements.namedItem(key).required=false;
+    const preview=document.createElement('p');
+    preview.setAttribute('role','status');
+    form.lastElementChild.before(preview);
+    const update=()=>{
+      const fields=form.elements;
+      const margin=Number(fields.namedItem('margem').value);
+      const lance=Number(fields.namedItem('lance').value);
+      preview.textContent=margin>=0 && margin<100?'Piso '+money.format(bidFloor(unitCost(item),record.margem_minima))+' · Lance pela margem '+money.format(bidFloor(unitCost(item),margin))+(lance>0?' · Margem do lance '+bidMargin(unitCost(item),lance).toFixed(2)+'%':''):'Informe uma margem menor que 100%.';
+    };
+    form.addEventListener('input',update);
+    update();
+  }});
+}
+
+function openDispute(view,row) {
+  const record=db.disputas.find(entry=>entry.edital_id===row.id)??{etapa:0,margem_minima:20,alerta:3,resultados:{},historico:[]};
+  view.replaceChildren();
+  const section=panel(view,'<h2>'+escape(row.numero)+' · '+escape(row.orgao)+'</h2><p>'+disputeStages[record.etapa]+'</p>');
+  action('Voltar ao quadro',render,section);
+  if(page==='disputa' && client) {
+    if(record.etapa<2) writeAction('Configurar farol',()=>disputeRules(view,row,record),section);
+    if(record.etapa===0) writeAction('Iniciar disputa',async()=>{await moveDispute(row,record,1);openDispute(view,row);},section,true);
+    if(record.etapa===1) writeAction('Enviar para acompanhamento',async()=>{await moveDispute(row,record,2);openDispute(view,row);},section,true);
+    if(record.etapa===2) writeAction('Reabrir disputa',async()=>{await moveDispute(row,record,1);openDispute(view,row);},section);
+  }
+  section.insertAdjacentHTML('beforeend','<p>Margem mínima '+Number(record.margem_minima)+'% · Amarelo até '+(Number(record.margem_minima)+Number(record.alerta))+'% · Verde acima dessa faixa · Vermelho abaixo da mínima</p>');
+  const items=disputeItems(row);
+  let won=0,wonTotal=0;
+  for(const [lot,grouped] of groupProposalItems(items)) {
+    if(lot) {
+      const floor=grouped.reduce((sum,item)=>sum+bidFloor(unitCost(item),record.margem_minima)*item.quantidade,0);
+      section.insertAdjacentHTML('beforeend','<h3>Lote '+escape(lot)+' · Piso total '+money.format(floor)+'</h3>');
+    }
+    const table=quoteTable(section,['Item','Descrição','Qtd.','Custo unit.','Proposta inicial','Piso unit.','Lance sugerido','Nosso lance','Margem e farol','Liderança','Resultado','Preço vencedor','Total vencedor','Auditoria','Ação']);
+    for(const item of grouped) {
+      const result=record.resultados[item.id]??{};
+      const cost=unitCost(item);
+      const floor=bidFloor(cost,record.margem_minima);
+      const suggested=bidFloor(cost,result.margem??item.margem);
+      const margin=bidMargin(cost,result.lance??suggested);
+      const color=margin==null?'':margin+1e-8<record.margem_minima?'Vermelho':margin<=Number(record.margem_minima)+Number(record.alerta)+1e-8?'Amarelo':'Verde';
+      const final=result.preco_final==null?null:Math.round(result.preco_final*item.quantidade*100)/100;
+      const audit=result.situacao==='Ganhamos'&&result.preco_final<floor?'Ganho abaixo do mínimo':result.situacao==='Perdemos'&&result.preco_final>=floor?'Perdido acima do mínimo':'—';
+      if(result.situacao==='Ganhamos') {won++;wonTotal+=final??0;}
+      const leader=result.situacao==='Estamos liderando'?'Nossa empresa':[result.concorrente,result.lance_concorrente==null?'':money.format(result.lance_concorrente)].filter(Boolean).join(' · ');
+      const outcome=[result.situacao,result.situacao==='Ganhamos'?db.empresas.find(e=>e.id===row.empresa_id)?.nome:result.vencedor,result.marca_vencedora,result.observacao].filter(Boolean).join(' · ');
+      const tr=table.insertRow();
+      for(const value of [item.codigo,printedDescription(item),item.quantidade,money.format(cost),money.format(price(item)),money.format(floor),money.format(suggested),result.lance==null?'—':money.format(result.lance)]) tr.insertCell().textContent=value;
+      const signal=tr.insertCell();
+      signal.textContent=color?color+' · '+margin.toFixed(2)+'%':'—';
+      if(color) signal.style.backgroundColor={Vermelho:'#fee2e2',Amarelo:'#fef3c7',Verde:'#dcfce7'}[color];
+      for(const value of [leader||'—',outcome||'Sem resultado',result.preco_final==null?'—':money.format(result.preco_final),final==null?'—':money.format(final),audit]) tr.insertCell().textContent=value;
+      const cell=tr.insertCell();
+      if(page==='disputa' && record.etapa===1) writeAction('Lance e resultado',()=>editDisputeItem(view,row,record,item),cell);
+    }
+  }
+  section.insertAdjacentHTML('beforeend','<p><strong>Itens ganhos: '+won+' · Total ganho: '+money.format(wonTotal)+'</strong></p>');
+  if(record.historico.length) {
+    const history=panel(view,'<h3>Histórico de movimentações</h3>');
+    const list=document.createElement('ul');
+    list.style.cssText='font-size:9pt;margin:4px 0';
+    for(const entry of [...record.historico].reverse()) {
+      const li=document.createElement('li');
+      li.textContent=disputeStages[entry.origem]+' → '+disputeStages[entry.destino]+' · '+entry.usuario+' · '+quoteDate.format(new Date(entry.data));
+      list.append(li);
+    }
+    history.append(list);
+  }
+}
+
+function renderDisputes(view) {
+  if(unavailableRegistries.has('disputas')) {
+    panel(view,'<p>O quadro de disputa aguarda a atualização do banco de dados.</p>');
+    return;
+  }
+  const follow=page==='acompanhamento';
+  const grid=document.createElement('section');
+  grid.style.cssText=follow?'':'display:grid;grid-template-columns:repeat(3,minmax(210px,1fr));gap:12px;overflow:auto';
+  const rows=db.editais.filter(row=>(row.status==='Aprovado'&&proposalStage(row)===5)||db.disputas.some(d=>d.edital_id===row.id));
+  const recordFor=row=>db.disputas.find(entry=>entry.edital_id===row.id)??{etapa:0,resultados:{}};
+  for(const [index,stage] of disputeStages.entries()) {
+    if(follow && index!==2) continue;
+    const entries=rows.filter(row=>recordFor(row).etapa===index);
+    const lane=document.createElement('section');
+    lane.className='lane';
+    lane.innerHTML='<h3>'+stage+' · '+entries.length+'</h3>';
+    if(!follow && client && canWrite()) {
+      lane.ondragover=event=>event.preventDefault();
+      lane.ondrop=event=>{
+        event.preventDefault();
+        const row=rows.find(entry=>entry.id===event.dataTransfer.getData('text/plain'));
+        if(row && recordFor(row).etapa!==index) moveDispute(row,recordFor(row),index).then(render).catch(error=>message(error.message));
+      };
+    }
+    for(const row of entries) {
+      const card=panel(lane,'<strong>'+escape(row.numero)+'</strong><p>'+escape(row.orgao)+'</p>');
+      card.classList.add('card');
+      card.draggable=!follow && !!client && canWrite();
+      card.ondragstart=event=>event.dataTransfer.setData('text/plain',row.id);
+      action(follow?'Ver resultado':'Abrir disputa',()=>openDispute(view,row),card);
+    }
+    grid.append(lane);
+  }
+  view.append(grid);
+}
+
 function renderProposalBoard(view) {
   const grid = document.createElement('section');
   grid.style.cssText = 'display:grid;grid-template-columns:repeat(6,minmax(210px,1fr));gap:12px;overflow:auto';
@@ -1208,6 +1376,7 @@ function render() {
   if (page === 'clientes' && master) { renderClients(view); return; }
   if (page === 'equipe' && groupRole() === 'admin') { renderTeam(view); return; }
   if (activeEdital) { renderProposal(view,db.editais.find(x => x.id === activeEdital)); return; }
+  if (page === 'disputa' || page === 'acompanhamento') { renderDisputes(view); return; }
   if (page === 'cotacoes' || page === 'orcamento') { renderQuotes(view); return; }
   if (page === 'financeiro') { renderQuoteFinance(view); return; }
   if (page === 'propostas') { renderProposalBoard(view); return; }
