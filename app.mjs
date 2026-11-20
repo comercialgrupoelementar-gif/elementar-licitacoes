@@ -121,7 +121,7 @@ async function load() {
     return;
   }
   const responses = await Promise.all(allTables.map(table => client.from(table).select(table === 'editais'
-    ? 'id,grupo_id,empresa_id,numero,numero_pregao,orgao,modalidade,sessao,status,parecer,edital_url,local_disputa,edital_pdf_nome,objeto,modo_disputa'
+    ? 'id,grupo_id,empresa_id,numero,numero_pregao,orgao,modalidade,sessao,status,parecer,edital_url,local_disputa,edital_pdf_nome,objeto,modo_disputa,etapa_proposta'
     : '*').eq('grupo_id',group)));
   const missing = new Set();
   responses.forEach(({error},i) => {
@@ -577,67 +577,74 @@ function renderEditalIndex(view, docs) {
   }
 }
 
-function renderProposalBoard(view) {
-  const lanes = {
-    'A montar':[], 'Em preparação':[], 'Checklist conferido':[]
-  };
-  for (const edital of db.editais.filter(row => row.status === 'Aprovado')) {
-    const items = db.itens.filter(row => row.edital_id === edital.id);
-    const documents = db.documentos.filter(row => row.edital_id === edital.id);
-    const stage = !items.length ? 'A montar'
-      : documents.length && documents.every(doc => doc.conferido) ? 'Checklist conferido'
-      : 'Em preparação';
-    lanes[stage].push({edital,items,documents});
+const proposalStages = ['A montar','Em preparação','Vincular documentação','Conferência 01','Conferência 02','Enviar para disputa'];
+const proposalStage = row=>Number(row.etapa_proposta ?? 0);
+
+async function moveProposal(row,destination) {
+  const origin = proposalStage(row);
+  if (Math.abs(destination-origin)!==1) throw new Error('Mova a proposta uma coluna por vez.');
+  const {error} = await client.rpc('mover_proposta',{p_edital:row.id,p_origem:origin,p_destino:destination});
+  if (error) throw error;
+  await load();
+  render();
+  if (destination===5) {
+    const scope = {grupo_id:row.grupo_id,empresa_id:row.empresa_id,edital_id:row.id};
+    const {data,error} = await client.from('anexos_proposta').select('arquivo_id').match(scope);
+    if (error) throw error;
+    const items = db.itens.filter(item=>item.edital_id===row.id);
+    await downloadProposalPackage(row,items,scope,new Set(data.map(link=>link.arquivo_id)));
   }
+}
+
+function proposalControls(parent,row) {
+  if (!client || !canWrite()) return;
+  const stage = proposalStage(row);
+  if (stage>0) action('Voltar para '+proposalStages[stage-1],()=>moveProposal(row,stage-1),parent);
+  if (stage<5) action(proposalStages[stage+1],()=>moveProposal(row,stage+1),parent,true);
+}
+
+function renderProposalBoard(view) {
   const grid = document.createElement('section');
-  grid.className = 'grid';
-  for (const [stage,proposals] of Object.entries(lanes)) {
+  grid.style.cssText = 'display:grid;grid-template-columns:repeat(6,minmax(210px,1fr));gap:12px;overflow:auto';
+  const approved = db.editais.filter(row=>row.status==='Aprovado');
+  for (const [index,stage] of proposalStages.entries()) {
+    const rows = approved.filter(row=>proposalStage(row)===index);
     const lane = document.createElement('section');
     lane.className = 'lane';
-    lane.innerHTML = `<h3>${stage} · ${proposals.length}</h3>`;
-    for (const {edital,items,documents} of proposals) {
-      const card = panel(lane,`<strong>${escape(edital.numero)}</strong><p>${escape(edital.orgao)}</p><p>${money.format(total(items))}</p><p class="muted">${documents.filter(doc=>doc.conferido).length}/${documents.length} documentos conferidos</p>`);
+    lane.innerHTML = '<h3>'+stage+' · '+rows.length+'</h3>';
+    if (client && canWrite()) {
+      lane.ondragover = event=>event.preventDefault();
+      lane.ondrop = event=>{
+        event.preventDefault();
+        const row = approved.find(row=>row.id===event.dataTransfer.getData('text/plain'));
+        if (row) moveProposal(row,index).catch(error=>message(error.message));
+      };
+    }
+    for (const row of rows) {
+      const card = panel(lane,'<strong>'+escape(row.numero)+'</strong><p>'+escape(row.orgao)+'</p><p>'+money.format(total(db.itens.filter(item=>item.edital_id===row.id)))+'</p>');
       card.classList.add('card');
-      function open(mode) {
-        detailMode = mode;
-        activeEdital = edital.id;
-        render();
-      }
-      action('Abrir proposta',()=>open('proposal'),card);
-      action('Documentação',()=>open('docs'),card);
+      card.draggable = Boolean(client && canWrite());
+      card.ondragstart = event=>event.dataTransfer.setData('text/plain',row.id);
+      action('Abrir proposta',()=>openWorkflowProposal(row),card);
     }
     grid.append(lane);
   }
   view.append(grid);
 }
 
-async function renderReadyProposals(view) {
-  const section = panel(view,'<h2>Propostas com documentação conferida</h2>');
-  if (!client) {
-    section.append('Os anexos estão disponíveis no sistema conectado.');
-    return;
-  }
-  const {data,error} = await client.from('anexos_proposta').select('edital_id').eq('grupo_id',group);
-  if (!section.isConnected) return;
-  if (error) {
-    if (!['PGRST205','42P01'].includes(error.code)) throw error;
-    section.append('O pacote de documentos aguarda a atualização do banco de dados.');
-    return;
-  }
-  const linked = new Set(data.map(row=>row.edital_id));
-  const ready = db.editais.filter(row=>{
-    if (row.status !== 'Aprovado' || !linked.has(row.id)) return false;
-    const docs = db.documentos.filter(doc=>doc.edital_id===row.id);
-    return docs.length && docs.every(doc=>doc.conferido) && db.itens.some(item=>item.edital_id===row.id);
-  });
-  if (!ready.length) section.append('Nenhuma proposta com itens, checklist conferido e arquivo anexado.');
-  for (const edital of ready) {
-    const card = panel(section,'<strong>'+escape(edital.numero)+'</strong><p>'+escape(edital.orgao)+'</p>');
-    action('Abrir pacote de envio',()=>{
-      activeEdital = edital.id;
-      detailMode = 'docs';
-      render();
-    },card,true);
+function openWorkflowProposal(row) {
+  activeEdital = row.id;
+  detailMode = 'proposal';
+  render();
+}
+
+function renderReadyProposals(view) {
+  const section = panel(view,'<h2>Propostas prontas para disputa</h2>');
+  const rows = db.editais.filter(row=>row.status==='Aprovado' && proposalStage(row)===5);
+  if (!rows.length) section.append('Nenhuma proposta nesta etapa.');
+  for (const row of rows) {
+    const card = panel(section,'<strong>'+escape(row.numero)+'</strong><p>'+escape(row.orgao)+'</p>');
+    action('Abrir proposta e baixar ZIP',()=>openWorkflowProposal(row),card);
   }
 }
 
@@ -859,8 +866,8 @@ function render() {
   if (page === 'equipe' && groupRole() === 'admin') { renderTeam(view); return; }
   if (activeEdital) { renderProposal(view,db.editais.find(x => x.id === activeEdital)); return; }
   if (page === 'propostas') { renderProposalBoard(view); return; }
-  if (page === 'propostaPronta') { renderReadyProposals(view).catch(error=>message(error.message)); return; }
-  if (page === 'documentacao') { renderEditalIndex(view,true); return; }
+  if (page === 'propostaPronta') { renderReadyProposals(view); return; }
+  if (page === 'documentacao') { renderAcervo(view).catch(error=>message(error.message)); return; }
   if (page === 'relatorios') { renderReports(view); return; }
   if (page === 'orgaos' || page === 'catalogo') { renderRegistry(view,page === 'orgaos'); return; }
   if (page === 'ajuda') { renderHelp(view); return; }
@@ -903,6 +910,89 @@ function render() {
   }
 }
 
+function documentExpired(file) {
+  const today = new Intl.DateTimeFormat('sv-SE',{timeZone:'America/Sao_Paulo'}).format(new Date());
+  return Boolean(file.validade && file.validade<today);
+}
+
+function documentValidity(file) {
+  if (!file.validade) return 'Validade não informada';
+  return (documentExpired(file)?'Vencido em ':'Válido até ')+file.validade.split('-').reverse().join('/');
+}
+
+async function renderAcervo(view) {
+  const section = panel(view,'<h2>Acervo de documentos da empresa</h2>');
+  if (!client || !db.empresas.length) { section.append('Cadastre um CNPJ participante para criar o acervo.'); return; }
+  const select = document.createElement('select');
+  select.setAttribute('aria-label','Empresa do documento');
+  for (const empresa of db.empresas) select.add(new Option(empresa.nome+' · '+empresa.cnpj,empresa.id));
+  section.append(select);
+  const list = document.createElement('div');
+  section.append(list);
+  async function draw() {
+    const company = select.value;
+    const scope = {grupo_id:group,empresa_id:company};
+    const {data,error} = await client.from('arquivos_empresa').select('id,nome,validade').match(scope).order('nome');
+    if (error) throw error;
+    if (!section.isConnected || select.value!==company) return;
+    list.replaceChildren();
+    writeAction('Cadastrar documento',()=>edit('Cadastrar documento',[['nome','Nome do documento','text'],['validade','Validade','date'],['arquivo','PDF','file']],async values=>{
+      const {error} = await client.from('arquivos_empresa').insert({...scope,nome:values.nome.trim(),validade:values.validade||null,conteudo:await encodePdf(values.arquivo)});
+      if (error) throw error;
+    },{onSaved:()=>draw().catch(error=>message(error.message))}),list,true);
+    if (!data.length) list.append('Nenhum documento cadastrado.');
+    for (const file of data) {
+      const card = panel(list,'<strong>'+escape(file.nome)+'</strong><p>'+escape(documentValidity(file))+'</p>');
+      action('Baixar PDF',async()=>{
+        const {data,error} = await client.from('arquivos_empresa').select('conteudo').match({...scope,id:file.id}).single();
+        if (error) throw error;
+        const url = URL.createObjectURL(new Blob([Uint8Array.from(atob(data.conteudo),c=>c.charCodeAt(0))],{type:'application/pdf'}));
+        const link = document.createElement('a');
+        link.href=url;
+        link.download=file.nome.replace(/\.pdf$/i,'')+'.pdf';
+        link.click();
+        setTimeout(()=>URL.revokeObjectURL(url),30000);
+      },card);
+      writeAction('Editar validade',()=>edit('Editar validade',[['validade','Validade','date',file.validade]],async values=>{
+        const {error}=await client.from('arquivos_empresa').update({validade:values.validade||null}).match({...scope,id:file.id});
+        if (error) throw error;
+      },{onSaved:()=>draw().catch(error=>message(error.message))}),card);
+    }
+  }
+  select.onchange = ()=>draw().catch(error=>message(error.message));
+  await draw();
+}
+
+async function renderProposalHistory(view,row) {
+  const section = panel(view,'<h2>Histórico de movimentações</h2>');
+  if (!client) return;
+  const {data,error} = await client.from('historico_proposta').select('origem,destino,responsavel,ocorrido_em')
+    .match({grupo_id:group,edital_id:row.id}).order('id',{ascending:false});
+  if (error) throw error;
+  if (!section.isConnected) return;
+  if (!data.length) section.append('Nenhuma movimentação registrada.');
+  const date = new Intl.DateTimeFormat('pt-BR',{dateStyle:'short',timeStyle:'medium',timeZone:'America/Sao_Paulo'});
+  for (const entry of data) panel(section,'<strong>'+proposalStages[entry.origem]+' → '+proposalStages[entry.destino]+'</strong><p>'+escape(entry.responsavel)+' · '+date.format(new Date(entry.ocorrido_em))+' (Brasília)</p>');
+}
+
+async function downloadProposalPackage(row,items,scope,selected) {
+  const {data,error} = await client.from('arquivos_empresa').select('id,nome,conteudo,validade')
+    .match({grupo_id:scope.grupo_id,empresa_id:scope.empresa_id}).in('id',[...selected]);
+  if (error) throw error;
+  if (data.length !== selected.size) throw new Error('Um arquivo vinculado ficou indisponível.');
+  if (data.some(documentExpired)) throw new Error('Há documentos vencidos. Volte para Vincular documentação e atualize a seleção.');
+  const empresa = db.empresas.find(entry=>entry.id===row.empresa_id);
+  const html = proposalHtml(row,items,empresa);
+  const files = data.map((file,index)=>({name:'documentos/'+(index+1)+'-'+(file.nome.replace(/\.pdf$/i,'')+'.pdf').replace(/[^\p{L}\p{N} ._-]/gu,'_'),bytes:Uint8Array.from(atob(file.conteudo),character=>character.charCodeAt(0))}));
+  const zip = makeZip([{name:'proposta-inicial.html',bytes:new TextEncoder().encode(html)},...files]);
+  const url = URL.createObjectURL(zip);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = 'proposta-'+row.numero.replace(/[^a-z0-9_-]/gi,'-')+'.zip';
+  link.click();
+  setTimeout(()=>URL.revokeObjectURL(url),30000);
+}
+
 async function proposalAttachments(section,row,items) {
   if (!row.empresa_id || !client) return;
   const scope = {grupo_id:group,empresa_id:row.empresa_id,edital_id:row.id};
@@ -924,8 +1014,8 @@ async function proposalAttachments(section,row,items) {
   if (!files.data.length) list.append('Nenhum arquivo cadastrado.');
   for (const file of files.data) {
     const linked = selected.has(file.id);
-    const card = panel(list,'<strong>'+escape(file.nome)+'</strong><p>'+(linked?'Anexado à proposta':'Disponível para anexar')+'</p>');
-    writeAction(linked?'Desvincular':'Anexar à proposta',async()=>{
+    const card = panel(list,'<strong>'+escape(file.nome)+'</strong><p>'+escape(documentValidity(file))+' · '+(linked?'Anexado à proposta':'Disponível para anexar')+'</p>');
+    if (proposalStage(row)<3 && (linked || !documentExpired(file))) writeAction(linked?'Desvincular':'Anexar à proposta',async()=>{
       const values = {...scope,arquivo_id:file.id};
       const {error} = await (linked
         ? client.from('anexos_proposta').delete().match(values)
@@ -934,52 +1024,8 @@ async function proposalAttachments(section,row,items) {
       if (section.isConnected) render();
     },card);
   }
-  if (canWrite()) {
-    section.insertAdjacentHTML('beforeend','<form><label>Adicionar PDF ao CNPJ<input type="file" name="arquivo" accept=".pdf" required></label><button type="submit">Salvar arquivo no cadastro</button><p role="alert"></p></form>');
-    const form = section.lastElementChild;
-    form.onsubmit = async event => {
-      event.preventDefault();
-      event.submitter.disabled = true;
-      const alert = form.querySelector('[role=alert]');
-      alert.textContent = '';
-      try {
-        const file = new FormData(form).get('arquivo');
-        if (!file.size || file.size > 5*1024*1024 || await file.slice(0,5).text() !== '%PDF-') {
-          throw new Error('Escolha um PDF válido de até 5 MB.');
-        }
-        const encoded = await new Promise((resolve,reject)=>{
-          const reader = new FileReader();
-          reader.onload = ()=>resolve(reader.result.split(',')[1]);
-          reader.onerror = ()=>reject(reader.error);
-          reader.readAsDataURL(file);
-        });
-        const {error} = await client.from('arquivos_empresa').insert({
-          grupo_id:scope.grupo_id,empresa_id:scope.empresa_id,nome:file.name,conteudo:encoded
-        });
-        if (error) throw error;
-        if (section.isConnected) render();
-      } catch(error) { alert.textContent = error.message; }
-      finally { event.submitter.disabled = false; }
-    };
-  }
-  const checklist = db.documentos.filter(doc=>doc.edital_id===row.id);
-  if (items.length && selected.size && checklist.length && checklist.every(doc=>doc.conferido)) {
-    action('Baixar ZIP da proposta',async()=>{
-      const {data,error} = await client.from('arquivos_empresa').select('id,nome,conteudo')
-        .match({grupo_id:scope.grupo_id,empresa_id:scope.empresa_id}).in('id',[...selected]);
-      if (error) throw error;
-      if (data.length !== selected.size) throw new Error('Um arquivo vinculado ficou indisponível.');
-      const empresa = db.empresas.find(entry=>entry.id===row.empresa_id);
-      const html = proposalHtml(row,items,empresa);
-      const files = data.map((file,index)=>({name:'documentos/'+(index+1)+'-'+file.nome.replace(/[^\p{L}\p{N} ._-]/gu,'_'),bytes:Uint8Array.from(atob(file.conteudo),character=>character.charCodeAt(0))}));
-      const zip = makeZip([{name:'proposta-inicial.html',bytes:new TextEncoder().encode(html)},...files]);
-      const url = URL.createObjectURL(zip);
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = 'proposta-'+row.numero.replace(/[^a-z0-9_-]/gi,'-')+'.zip';
-      link.click();
-      setTimeout(()=>URL.revokeObjectURL(url),30000);
-    },section,true);
+  if (proposalStage(row)===5 && items.length && selected.size) {
+    action('Baixar ZIP da proposta',()=>downloadProposalPackage(row,items,scope,selected),section,true);
   }
 }
 
@@ -1162,9 +1208,11 @@ function readXmlItems(text) {
 
 function renderProposal(view,row) {
   const rows = db.itens.filter(x=>x.edital_id===row.id);
-  const docs = db.documentos.filter(x=>x.edital_id===row.id);
+  
   const section = panel(view,'<h2>Proposta · '+escape(row.numero)+'</h2><p>'+escape(row.orgao)+' · '+escape(db.empresas.find(e=>e.id===row.empresa_id)?.nome)+'</p><p>Total estimado <strong>'+money.format(total(rows))+'</strong></p>');
-  if (row.status==='Aprovado') {
+  section.insertAdjacentHTML('beforeend','<p>Etapa: <strong>'+proposalStages[proposalStage(row)]+'</strong></p>');
+  proposalControls(section,row);
+  if (row.status==='Aprovado' && proposalStage(row)<3) {
     writeAction('Adicionar item',()=>item(row),section,true);
     writeAction('Importar planilha Excel',()=>importProposalItems(row),section);
     if (canWrite()) section.insertAdjacentHTML('beforeend',' <a href="./modelo-itens-proposta.xlsx" download>Baixar modelo Excel (.xlsx)</a>');
@@ -1178,17 +1226,11 @@ function renderProposal(view,row) {
     const tr = table.querySelector('tbody').insertRow();
     for (const value of [entry.lote,entry.codigo,catalogCode(entry),printedDescription(entry),entry.quantidade,entry.unidade,entry.marca,(entry.custo_embalagem/entry.embalagem).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:4}),entry.margem+'%',entry.fornecedor,entry.observacao,money.format(price(entry)),money.format(total([entry]))]) tr.insertCell().textContent=value;
     const controls=tr.insertCell();
-    if(row.status==='Aprovado') writeAction('Editar',()=>item(row,entry),controls);
+    if(row.status==='Aprovado' && proposalStage(row)<3) writeAction('Editar',()=>item(row,entry),controls);
   }
-  if (detailMode === 'docs') section.remove();
-  if (detailMode === 'proposal') return;
-  const checklist=panel(view,'<h2>Checklist documental</h2>');
-  writeAction('Adicionar requisito',()=>documentEditor(row),checklist,true);
-  for(const doc of docs){
-    const card=panel(checklist,'<strong>'+escape(doc.nome)+'</strong><p>'+escape(doc.conferido?'Conferido':'Pendente')+(doc.validade?' · validade '+escape(doc.validade):'')+'</p>');
-    writeAction('Conferir',()=>documentEditor(row,doc),card);
-  }
-  proposalAttachments(checklist,row,rows).catch(error=>{if(checklist.isConnected) message(error.message);});
+  const attachments = panel(view,'<h2>Documentos selecionados para disputa</h2>');
+  proposalAttachments(attachments,row,rows).catch(error=>{if(attachments.isConnected) message(error.message);});
+  renderProposalHistory(view,row).catch(error=>message(error.message));
 }
 
 async function loadGroups(){
