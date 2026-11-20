@@ -1059,6 +1059,7 @@ function openDispute(view,row) {
       section.insertAdjacentHTML('beforeend','<h3>Lote '+escape(lot)+' · Piso total '+money.format(floor)+'</h3>');
     }
     const table=quoteTable(section,['Item','Descrição','Qtd.','Custo unit.','Proposta inicial','Piso unit.','Margem (%)','Lance sugerido','Farol da margem','Nosso lance','Liderança','Resultado','Fornecedor vencedor','Preço vencedor','Total vencedor','Diferença para nosso lance (R$)','Diferença para nosso lance (%)','Nossa margem no preço vencedor','Auditoria','Ação']);
+    table.closest('table').classList.add('dispute-table');
     for(const item of grouped) {
       const result=record.resultados[item.id]??{};
       const cost=unitCost(item);
