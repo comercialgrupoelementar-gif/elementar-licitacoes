@@ -1475,6 +1475,7 @@ function renderOverview(view) {
   const bannerStats=overview.querySelector('.banner-side');
   view.append(overview);
   const filter=panel(view,'<label>Ano em vigor<select></select></label>');
+  filter.classList.add('overview-year-filter');
   const select=filter.querySelector('select');
   for(const year of years) select.add(new Option(year,year));
   select.add(new Option('Todos os anos','todos'));
