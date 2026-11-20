@@ -121,7 +121,7 @@ async function load() {
   }
   const responses = await Promise.all(allTables.map(table => client.from(table).select(table === 'editais'
     ? 'id,grupo_id,empresa_id,numero,numero_pregao,orgao,modalidade,sessao,status,parecer,edital_url,local_disputa,edital_pdf_nome,objeto,modo_disputa,etapa_proposta'
-    : '*').eq('grupo_id',group)));
+    : table==='cotacoes' ? 'id,grupo_id,empresa_id,titulo,fornecedor,email,observacao,etapa,itens,historico,revisao,criado_em,tipo,orgao_id,assinado_em' : '*').eq('grupo_id',group)));
   const missing = new Set();
   responses.forEach(({error},i) => {
     if (!error) return;
@@ -602,6 +602,8 @@ function proposalControls(parent,row) {
 }
 
 const quoteStages = ['Em cotação','Revisão','Enviado'];
+const budgetStages = ['Em elaboração','Revisão e assinatura','Enviado'];
+const isBudget = row=>row.tipo==='orcamento';
 const quoteDate = new Intl.DateTimeFormat('pt-BR',{dateStyle:'short',timeStyle:'short',timeZone:'America/Sao_Paulo'});
 
 async function updateQuote(row,values) {
@@ -613,7 +615,47 @@ async function updateQuote(row,values) {
   return data.id;
 }
 
+function budgetForm(view,row) {
+  edit(row.id?'Editar orçamento':'Novo orçamento',[
+    ['titulo','Referência ou assunto do pedido','text',row.titulo],
+    ['empresa_id','Empresa emitente','select',row.empresa_id ?? db.empresas[0]?.id,db.empresas.map(company=>[company.id,company.nome+' · '+company.cnpj])],
+    ['orgao_id','Órgão solicitante','select','',[]],
+    ['email','E-mail do órgão','email',row.email],
+    ['observacao','Condições comerciais e observações','textarea',row.observacao]
+  ],async values=>{
+    const orgao=db.orgaos_compradores.find(entry=>entry.id===values.orgao_id);
+    if (!values.empresa_id || !orgao || !values.titulo.trim()) throw new Error('Informe a referência, a empresa emitente e o órgão solicitante.');
+    const data={...values,titulo:values.titulo.trim(),fornecedor:orgao.nome};
+    return row.id?updateQuote(row,data):save('cotacoes',client?{...data,tipo:'orcamento'}:{...data,tipo:'orcamento',etapa:0,itens:[],historico:[]});
+  },{onSaved:id=>openQuote(view,id),decorate:form=>registryPicker(form,{name:'orgao_id',table:'orgaos_compradores',label:'Buscar prefeitura ou órgão',
+    placeholder:'Selecione um órgão solicitante',title:'Cadastrar órgão comprador',fields:name=>agencyFields({nome:name}),saveRecord:values=>saveAgency(values),
+    entryLabel:entry=>entry.nome+' · '+entry.cnpj,searchText:entry=>[entry.nome,entry.cnpj].join(' '),initial:row.orgao_id??'',
+    apply:entry=>{const email=form.elements.namedItem('email'); if (entry?.email && !email.value) email.value=entry.email;}})});
+}
+
+const budgetPdfItem=item=>({...item,codigo:item.codigo,preco_unitario:item.preco});
+function renderBudgetActions(section,view,row) {
+  const priced=row.itens.length && row.itens.every(item=>item.preco!=null);
+  if (priced) action('Baixar orçamento em PDF',()=>downloadProposalPdf({
+    ...row,orgao:row.fornecedor,numero:row.titulo,objeto:row.titulo
+  },row.itens.map(budgetPdfItem),{budget:true}),section);
+  if (priced) section.insertAdjacentHTML('beforeend','<p><strong>Total do orçamento: '+money.format(total(row.itens.map(budgetPdfItem)))+'</strong></p>');
+  if (row.assinado_em) action('Baixar orçamento assinado',async()=>{
+    const {data,error}=await client.from('cotacoes').select('pdf_assinado').match({grupo_id:group,id:row.id}).single();
+    if (error) throw error;
+    if (!data.pdf_assinado) throw new Error('O PDF assinado não está disponível.');
+    saveQuoteFile(new Blob([pdfBytes(data.pdf_assinado)],{type:'application/pdf'}),'orcamento-assinado-'+row.id.slice(0,8)+'.pdf');
+  },section);
+  if (client && row.etapa===1 && priced) {
+    section.insertAdjacentHTML('beforeend','<p>Baixe o PDF, assine digitalmente ou à mão e anexe o documento assinado. Envie o arquivo ao órgão pelo canal solicitado e depois marque como enviado.</p>');
+    writeAction(row.assinado_em?'Substituir PDF assinado':'Anexar orçamento assinado',()=>edit('Anexar orçamento assinado',
+      [['arquivo','Orçamento assinado em PDF','file']],async ({arquivo})=>updateQuote(row,{pdf_assinado:await encodePdf(arquivo)}),
+      {onSaved:id=>openQuote(view,id)}),section,true);
+  }
+}
+
 function quoteForm(view,row={}) {
+  if (page==='orcamento') return budgetForm(view,row);
   edit(row.id?'Editar cotação':'Nova cotação',[
     ['titulo','Título da cotação','text',row.titulo],
     ['empresa_id','Empresa solicitante','select',row.empresa_id ?? db.empresas[0]?.id,db.empresas.map(company=>[company.id,company.nome+' · '+company.cnpj])],
@@ -630,9 +672,10 @@ function quoteForm(view,row={}) {
 }
 
 function quoteItem(view,row,item) {
+  const budget=isBudget(row);
   const fields = item ? [
     ['quantidade','Quantidade solicitada','number',item.quantidade],
-    ['preco','Preço unitário retornado pelo fornecedor','number',item.preco]
+    ['preco',budget?'Preço unitário ofertado (R$)':'Preço unitário retornado pelo fornecedor','number',item.preco]
   ] : [
     ['catalogo_id','Produto ou serviço','select','',[]],
     ['quantidade','Quantidade solicitada','number',1]
@@ -642,7 +685,7 @@ function quoteItem(view,row,item) {
     const source = db.catalogo.find(entry=>entry.id===values.catalogo_id);
     if (!item && !source) throw new Error('Selecione um item do catálogo.');
     const quantidade = Number(values.quantidade);
-    const preco = values.preco ? Number(values.preco) : null;
+    const preco = item ? (values.preco ? Number(values.preco) : null) : budget && source ? financialPrice(source)?.final ?? null : null;
     if (!Number.isFinite(quantidade) || quantidade<=0 || (preco!==null && (!Number.isFinite(preco) || preco<0 || preco>=1e10))) throw new Error('Confira a quantidade e o preço informado.');
     const picked = item ?? {catalogo_id:source.id,codigo:source.codigo,descricao:source.descricao,unidade:source.unidade,marca:source.marca,custo_base:Number(source.custo)};
     const entry = {...picked,quantidade,preco};
@@ -650,7 +693,7 @@ function quoteItem(view,row,item) {
     return updateQuote(row,{itens});
   },{onSaved:id=>openQuote(view,id),decorate:form=>{
     if (item) {
-      form.elements.namedItem('preco').required=false;
+      form.elements.namedItem('preco').required=budget;
       if (row.etapa===2) form.elements.namedItem('quantidade').readOnly=true;
       return;
     }
@@ -663,6 +706,7 @@ function quoteItem(view,row,item) {
 async function moveQuote(row,destination) {
   if (Math.abs(destination-row.etapa)!==1) throw new Error('Mova a cotação uma coluna por vez.');
   if (destination>row.etapa && !row.itens.length) throw new Error('Inclua pelo menos um item do catálogo.');
+  if (isBudget(row) && destination===2 && !row.assinado_em) throw new Error('Anexe o orçamento assinado antes de marcar como enviado.');
   const values={etapa:destination};
   if (!client) values.historico=[...row.historico,{origem:row.etapa,destino:destination,usuario:'Demonstração',data:new Date().toISOString()}];
   await updateQuote(row,values);
@@ -673,11 +717,14 @@ function renderQuotes(view) {
     panel(view,'<p>As cotações aguardam a atualização do banco de dados.</p>');
     return;
   }
-  writeAction('Nova cotação',()=>quoteForm(view),byId('page-actions'),true);
+  const budget=page==='orcamento';
+  const stages=budget?budgetStages:quoteStages;
+  const records=db.cotacoes.filter(row=>isBudget(row)===budget);
+  writeAction(budget?'Novo orçamento':'Nova cotação',()=>quoteForm(view),byId('page-actions'),true);
   const grid=document.createElement('section');
   grid.style.cssText='display:grid;grid-template-columns:repeat(3,minmax(210px,1fr));gap:12px;overflow:auto';
-  for (const [index,stage] of quoteStages.entries()) {
-    const rows=db.cotacoes.filter(row=>row.etapa===index);
+  for (const [index,stage] of stages.entries()) {
+    const rows=records.filter(row=>row.etapa===index);
     const lane=document.createElement('section');
     lane.className='lane';
     lane.innerHTML='<h3>'+stage+' · '+rows.length+'</h3>';
@@ -685,7 +732,7 @@ function renderQuotes(view) {
       lane.ondragover=event=>event.preventDefault();
       lane.ondrop=event=>{
         event.preventDefault();
-        const row=db.cotacoes.find(record=>record.id===event.dataTransfer.getData('text/plain'));
+        const row=records.find(record=>record.id===event.dataTransfer.getData('text/plain'));
         if (row && row.etapa!==index) moveQuote(row,index).then(render).catch(error=>message(error.message));
       };
     }
@@ -694,7 +741,7 @@ function renderQuotes(view) {
       card.classList.add('card');
       card.draggable=canWrite();
       card.ondragstart=event=>event.dataTransfer.setData('text/plain',row.id);
-      action('Abrir cotação',()=>openQuote(view,row.id),card);
+      action(budget?'Abrir orçamento':'Abrir cotação',()=>openQuote(view,row.id),card);
     }
     grid.append(lane);
   }
@@ -703,30 +750,33 @@ function renderQuotes(view) {
 
 function openQuote(view,id) {
   const row=db.cotacoes.find(entry=>entry.id===id);
-  if (page!=='cotacoes' || !row) return;
+  if (!row || page!==(isBudget(row)?'orcamento':'cotacoes')) return;
+  const budget=isBudget(row);
+  const stages=budget?budgetStages:quoteStages;
   view.replaceChildren();
   byId('page-actions').replaceChildren();
   action('Voltar ao quadro',render,byId('page-actions'));
-  const section=panel(view,'<h2>'+escape(row.titulo)+'</h2><p>'+escape(row.fornecedor)+' · '+quoteStages[row.etapa]+'</p>');
+  const section=panel(view,'<h2>'+escape(row.titulo)+'</h2><p>'+escape(row.fornecedor)+' · '+stages[row.etapa]+'</p>');
   if (row.observacao) section.insertAdjacentHTML('beforeend','<p>'+escape(row.observacao)+'</p>');
   if (row.etapa<2) {
-    writeAction('Editar cotação',()=>quoteForm(view,row),section);
+    writeAction(budget?'Editar orçamento':'Editar cotação',()=>quoteForm(view,row),section);
     writeAction('Adicionar item do catálogo',()=>quoteItem(view,row),section,true);
   }
-  if (row.etapa>0) writeAction('Voltar para '+quoteStages[row.etapa-1],async()=>{await moveQuote(row,row.etapa-1);openQuote(view,id);},section);
+  if (row.etapa>0) writeAction('Voltar para '+stages[row.etapa-1],async()=>{await moveQuote(row,row.etapa-1);openQuote(view,id);},section);
   if (row.etapa<2) writeAction(row.etapa===1?'Marcar como enviado':'Mover para revisão',async()=>{await moveQuote(row,row.etapa+1);openQuote(view,id);},section);
-  if (row.itens.length) {
+  if (budget) renderBudgetActions(section,view,row);
+  if (!budget && row.itens.length) {
     action('Baixar PDF para o fornecedor',()=>downloadQuote(row,'pdf'),section);
     action('Baixar XML para o fornecedor',()=>downloadQuote(row,'xml'),section);
   }
-  if (row.etapa===2 && row.itens.some(item=>item.preco!=null)) action('Ver preços no Financeiro',()=>{page='financeiro';render();},section);
-  const table=quoteTable(section,['Código','Produto ou serviço','Quantidade','Unidade','Preço retornado','Ações']);
+  if (!budget && row.etapa===2 && row.itens.some(item=>item.preco!=null)) action('Ver preços no Financeiro',()=>{page='financeiro';render();},section);
+  const table=quoteTable(section,['Código','Produto ou serviço','Quantidade','Unidade',budget?'Preço ofertado':'Preço retornado',...(budget?['Total']:[]),'Ações']);
   for (const item of row.itens) {
     const line=table.insertRow();
-    for (const value of [item.codigo,item.descricao,item.quantidade,item.unidade,item.preco == null?'Aguardando preço':money.format(item.preco)]) line.insertCell().textContent=value;
+    for (const value of [item.codigo,item.descricao,item.quantidade,item.unidade,item.preco == null?'Aguardando preço':money.format(item.preco),...(budget?[item.preco==null?'—':money.format(total([budgetPdfItem(item)]))]:[])]) line.insertCell().textContent=value;
     const controls=line.insertCell();
     if (item.aplicado_em) controls.textContent='Custo aplicado em '+quoteDate.format(new Date(item.aplicado_em));
-    else writeAction(row.etapa===2?'Registrar preço':'Editar item',()=>quoteItem(view,row,item),controls);
+    else if (!budget || row.etapa<2) writeAction(row.etapa===2?'Registrar preço':'Editar item',()=>quoteItem(view,row,item),controls);
     if (row.etapa<2 && !item.aplicado_em) writeAction('Remover',async()=>{
       await updateQuote(row,{itens:row.itens.filter(other=>other.catalogo_id!==item.catalogo_id)});
       openQuote(view,id);
@@ -738,7 +788,7 @@ function openQuote(view,id) {
     list.style.cssText='list-style:none;margin:4px 0;padding:0;font-size:9pt;line-height:1.45';
     for(const entry of [...row.historico].reverse()) {
       const line=document.createElement('li');
-      line.textContent=[entry.origem==null?quoteStages[entry.destino]:quoteStages[entry.origem]+' → '+quoteStages[entry.destino],entry.usuario,quoteDate.format(new Date(entry.data))].filter(Boolean).join(' · ');
+      line.textContent=[entry.origem==null?stages[entry.destino]:stages[entry.origem]+' → '+stages[entry.destino],entry.usuario,quoteDate.format(new Date(entry.data))].filter(Boolean).join(' · ');
       list.append(line);
     }
     history.append(list);
@@ -874,7 +924,7 @@ function renderFinancialPrices(view) {
 function renderQuoteFinance(view) {
   renderFinancialPrices(view);
   const section=panel(view,'<h2>Preços recebidos de fornecedores</h2><p>Compare o preço recebido com o custo do catálogo antes de aplicar.</p>');
-  const received=db.cotacoes.filter(row=>row.etapa===2).flatMap(row=>row.itens.filter(item=>item.preco!=null).map(item=>({row,item})));
+  const received=db.cotacoes.filter(row=>!isBudget(row) && row.etapa===2).flatMap(row=>row.itens.filter(item=>item.preco!=null).map(item=>({row,item})));
   if (!received.length) { section.append('Nenhum preço recebido registrado em cotações enviadas.'); return; }
   const table=quoteTable(section,['Cotação e fornecedor','Produto ou serviço','Custo atual','Preço recebido','Diferença','Ação']);
   for (const {row,item} of received) {
@@ -1158,7 +1208,7 @@ function render() {
   if (page === 'clientes' && master) { renderClients(view); return; }
   if (page === 'equipe' && groupRole() === 'admin') { renderTeam(view); return; }
   if (activeEdital) { renderProposal(view,db.editais.find(x => x.id === activeEdital)); return; }
-  if (page === 'cotacoes') { renderQuotes(view); return; }
+  if (page === 'cotacoes' || page === 'orcamento') { renderQuotes(view); return; }
   if (page === 'financeiro') { renderQuoteFinance(view); return; }
   if (page === 'propostas') { renderProposalBoard(view); return; }
   if (page === 'propostaPronta') { renderReadyProposals(view); return; }
@@ -1380,7 +1430,7 @@ async function proposalPdfLibrary() {
   return pdfLibrary;
 }
 
-async function downloadProposalPdf(row,items) {
+async function downloadProposalPdf(row,items,{budget=false}={}) {
   const Pdf = await proposalPdfLibrary();
   const pdf = new Pdf({unit:'mm',format:'a4'});
   const company = db.empresas.find(entry=>entry.id===row.empresa_id);
@@ -1405,16 +1455,17 @@ async function downloadProposalPdf(row,items) {
     pdf.addImage(identity.logo,image.fileType,16,y,image.width*scale,image.height*scale);
     y+=image.height*scale+5;
   }
-  write('PROPOSTA COMERCIAL',{size:17,bold:true});
+  write(budget?'ORÇAMENTO COMERCIAL':'PROPOSTA COMERCIAL',{size:17,bold:true});
   write('Razão social: '+(company?.nome??''),{bold:true});
   write('CNPJ: '+(company?.cnpj??''));
   for (const [key,label] of proposalIdentity) if (identity[key]) write(label+': '+identity[key]);
   y+=3;
   write('À atenção do Setor de Licitações — '+row.orgao);
-  write('Processo: '+row.numero+' · '+row.modalidade+' '+(row.numero_pregao??''));
+  write(budget?'Referência da solicitação: '+row.numero:'Processo: '+row.numero+' · '+row.modalidade+' '+(row.numero_pregao??''));
   if (row.sessao) write('Data da sessão: '+row.sessao.split('-').reverse().join('/'));
   if (row.local_disputa) write('Local ou portal da disputa: '+row.local_disputa);
-  write('Objeto: '+(row.objeto??''));
+  write((budget?'Objeto do orçamento: ':'Objeto: ')+(row.objeto??''));
+  if (budget && row.observacao) write(row.observacao);
   for (const [lot,entries] of groupProposalItems(items)) {
     if (lot) { y+=3; write('Lote '+lot,{bold:true}); }
     for (const item of entries) {
@@ -1428,7 +1479,7 @@ async function downloadProposalPdf(row,items) {
     if (lot) write('Subtotal do lote: '+money.format(total(entries)),{bold:true});
   }
   y+=4;
-  write('Valor total da proposta: '+money.format(total(items)),{size:12,bold:true});
+  write((budget?'Valor total do orçamento: ':'Valor total da proposta: ')+money.format(total(items)),{size:12,bold:true});
   space(35);
   y+=16;
   pdf.line(16,y,103,y);
@@ -1443,7 +1494,7 @@ async function downloadProposalPdf(row,items) {
     pdf.setTextColor(115);
     pdf.text('Gerado pelo E-Lementar Licitações',194,289,{align:'right'});
   }
-  pdf.save('proposta-'+row.numero.replace(/[^a-z0-9_-]/gi,'-')+'.pdf');
+  pdf.save((budget?'orcamento-':'proposta-')+row.numero.replace(/[^a-z0-9_-]/gi,'-')+'.pdf');
 }
 
 const pdfBytes = base64=>Uint8Array.from(atob(base64),character=>character.charCodeAt(0));
