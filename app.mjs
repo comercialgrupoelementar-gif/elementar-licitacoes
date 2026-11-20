@@ -1463,6 +1463,17 @@ function renderOverview(view) {
   const yearNow=new Intl.DateTimeFormat('pt-BR',{year:'numeric',timeZone:'America/Sao_Paulo'}).format(new Date());
   const yearOf=row=>row.sessao?.slice(0,4) || row.numero?.match(/(?:^|[^0-9])((?:19|20)[0-9]{2})(?![0-9])/)?.[1] || '';
   const years=[...new Set([yearNow,...db.editais.map(yearOf),...db.cotacoes.map(row=>row.criado_em?.slice(0,4))].filter(Boolean))].sort().reverse();
+  const overview=document.createElement('section');
+  overview.className='overview-banner';
+  overview.innerHTML='<div><span class="eyebrow">OPERAÇÃO DE LICITAÇÕES</span><h2>Editais e propostas,<br>na mesma direção.</h2><p>Acompanhe oportunidades, organize a documentação e prepare suas propostas.</p><div class="hero-buttons"></div></div><div class="banner-side"></div>';
+  const controls=overview.querySelector('.hero-buttons');
+  const board=action('Abrir quadro de captação',()=>goTo('editais'),controls);
+  board.className='accent';
+  board.insertAdjacentHTML('beforeend',icon('arrow'));
+  action('Ver propostas',()=>goTo('propostas'),controls).className='outline-light';
+  action('Ver relatórios',()=>goTo('relatorios'),controls).className='outline-light';
+  const bannerStats=overview.querySelector('.banner-side');
+  view.append(overview);
   const filter=panel(view,'<label>Ano em vigor<select></select></label>');
   const select=filter.querySelector('select');
   for(const year of years) select.add(new Option(year,year));
@@ -1478,6 +1489,12 @@ function renderOverview(view) {
     const editais=db.editais.filter(row=>inYear(yearOf(row)));
     const ids=new Set(editais.map(row=>row.id));
     const items=db.itens.filter(item=>ids.has(item.edital_id));
+    const count=status=>editais.filter(row=>row.status===status).length;
+    bannerStats.innerHTML=[
+      ['Editais captados',count('Captado')],['Editais em análise',count('Em análise')],
+      ['Editais aprovados',count('Aprovado')],['Propostas com itens',new Set(items.map(item=>item.edital_id)).size]
+    ].map(([label,value])=>'<div><span>'+label+'</span><strong>'+value+'</strong></div>').join('');
+
     const disputes=db.disputas.filter(row=>ids.has(row.edital_id));
     const disputeIds=new Set(disputes.map(row=>row.edital_id));
     const waiting=editais.filter(row=>row.status==='Aprovado' && proposalStage(row)===5 && !disputeIds.has(row.id)).length;
