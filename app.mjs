@@ -1,4 +1,5 @@
 import {normalizeDocument, validDocument} from './documentos.mjs';
+import {makeZip} from './pacote.mjs';
 import {supabaseUrl, supabasePublishableKey} from './config.mjs';
 
 const client = supabaseUrl && supabasePublishableKey
@@ -26,7 +27,6 @@ const screens = {
 const pendingScreens = {
   cotacoes:'Solicitações de cotação e revisão de preços para fornecedores, com exportação em PDF e XML.',
   orcamento:'Orçamentos para órgãos compradores antes da publicação do edital.',
-  propostaPronta:'Pacote ZIP com a proposta inicial e os documentos selecionados do CNPJ participante.',
   disputa:'Acompanhamento de lances e simulação de preços pela margem.',
   acompanhamento:'Negociação após a disputa, emissão de proposta readequada e acompanhamento até a assinatura.',
   finalizados:'Arquivo de ARP, ata da sessão, contratos e documentos do processo.',
@@ -54,9 +54,10 @@ function action(label, run, parent, primary = false) {
   return button;
 }
 
-function edit(title, fields, save) {
-  const form = byId('form');
-  byId('editor-title').textContent = title;
+function edit(title, fields, save, options = {}) {
+  const {dialog = byId('editor'), decorate, onSaved = render} = options;
+  const form = dialog.querySelector('form');
+  dialog.querySelector('h2').textContent = title;
   form.replaceChildren();
   for (const [name,label,type,value,options] of fields) {
     const wrapper = document.createElement('label');
@@ -84,16 +85,16 @@ function edit(title, fields, save) {
   submit.type = 'submit';
   submit.className = 'primary';
   controls.append(submit);
-  action('Cancelar', () => byId('editor').close(), controls);
+  action('Cancelar', () => dialog.close(), controls);
   form.append(controls);
   form.onsubmit = async event => {
     event.preventDefault();
     submit.disabled = true;
     try {
       message('');
-      await save(Object.fromEntries(new FormData(form)));
-      byId('editor').close();
-      render();
+      const result = await save(Object.fromEntries(new FormData(form)));
+      dialog.close();
+      onSaved(result);
     } catch (error) {
       form.querySelector('[role=alert]')?.remove();
       const alert = document.createElement('p');
@@ -102,7 +103,8 @@ function edit(title, fields, save) {
       form.append(alert);
     } finally { submit.disabled = false; }
   };
-  byId('editor').showModal();
+  decorate?.(form);
+  dialog.showModal();
 }
 
 async function load() {
@@ -149,31 +151,133 @@ const groupRole = () => groups.find(item => item.id === group)?.role;
 const canWrite = () => !client || ['admin','operador'].includes(groupRole());
 const writeAction = (label,run,parent,primary) => { if (canWrite()) action(label,run,parent,primary); };
 
-function company() {
-  edit('Cadastrar CNPJ participante',[
-    ['nome','Razão social','text'],['cnpj','CNPJ completo','text'],
+function companyFields(row = {}) {
+  return [
+    ['nome','Razão social','text',row.nome],['cnpj','CNPJ completo','text',row.cnpj],
     ['porte','Enquadramento informado','select','MEI',['MEI','MEI Caminhoneiro','ME','EPP','Demais']]
-  ], values => {
-    values.cnpj = normalizeDocument(values.cnpj);
-    if (values.cnpj.length !== 14 || !validDocument(values.cnpj)) throw new Error('Informe um CNPJ válido, incluindo os dois dígitos verificadores.');
-    if (db.empresas.some(row => row.cnpj === values.cnpj)) throw new Error('CNPJ já cadastrado neste grupo.');
-    return save('empresas',values);
-  });
+  ];
+}
+
+async function saveCompany(values) {
+  values.nome = values.nome.trim();
+  values.cnpj = normalizeDocument(values.cnpj);
+  if (!values.nome) throw new Error('Informe a razão social.');
+  if (values.cnpj.length !== 14 || !validDocument(values.cnpj)) throw new Error('Informe um CNPJ válido, incluindo os dois dígitos verificadores.');
+  if (db.empresas.some(row => row.cnpj === values.cnpj)) throw new Error('CNPJ já cadastrado neste grupo.');
+  await save('empresas',values);
+  return db.empresas.find(row=>row.cnpj===values.cnpj);
+}
+
+function company() {
+  edit('Cadastrar CNPJ participante',companyFields(),saveCompany);
+}
+
+function agencyFields(row = {}) {
+  return [
+    ['nome','Razão social / Nome do órgão','text',row.nome],
+    ['cnpj','CNPJ','text',row.cnpj],['municipio','Município','text',row.municipio],
+    ['uf','UF','select',row.uf ?? 'MG','AC AL AP AM BA CE DF ES GO MA MT MS MG PA PB PR PE PI RJ RN RS RO RR SC SP SE TO'.split(' ')],
+    ['email','E-mail institucional','email',row.email]
+  ];
+}
+
+async function saveAgency(values,id) {
+  for (const key of Object.keys(values)) values[key] = values[key].trim();
+  values.cnpj = normalizeDocument(values.cnpj);
+  if (values.cnpj.length !== 14 || !validDocument(values.cnpj)) throw new Error('Informe um CNPJ válido.');
+  if (!values.nome || !values.municipio) throw new Error('Informe o órgão e o município.');
+  if (db.orgaos_compradores.some(entry=>entry.cnpj===values.cnpj && entry.id!==id)) throw new Error('Este CNPJ já está cadastrado.');
+  await save('orgaos_compradores',values,id);
+  return db.orgaos_compradores.find(entry=>entry.cnpj===values.cnpj);
+}
+
+const normalizeSearch = value => value.toLocaleLowerCase('pt-BR').normalize('NFD').replace(/\p{Diacritic}/gu,'');
+
+function registryPicker(form,{name,table,label,placeholder,title,fields,saveRecord,entryLabel,searchText,initial = '',legacy,apply}) {
+  const select = form.elements.namedItem(name);
+  select.value = initial;
+  if (apply) select.onchange = ()=>apply(db[table].find(entry=>entry.id===select.value));
+
+  const controls = document.createElement('div');
+  controls.innerHTML = `<label>${label}<input type="search" placeholder="${placeholder}"></label>`;
+  select.closest('label').before(controls);
+  const search = controls.querySelector('input');
+  function populate(selected) {
+    const query = normalizeSearch(search.value.trim());
+    const document = normalizeDocument(query);
+    select.replaceChildren(new Option(placeholder,''));
+    if (legacy) select.add(new Option(legacy+' · registro atual','atual'));
+    for (const entry of db[table]) {
+      if (entry.id !== selected && !normalizeSearch(searchText(entry)).includes(query)
+          && !(document && entry.cnpj?.includes(document))) continue;
+      select.add(new Option(entryLabel(entry),entry.id));
+    }
+    select.value = selected;
+  }
+  search.oninput = ()=>populate(select.value);
+  populate(initial);
+  if (unavailableRegistries.has(table)) {
+    controls.append('Este cadastro aguarda a atualização do banco de dados.');
+    return;
+  }
+  writeAction(title,()=>{
+    const dialog = document.createElement('dialog');
+    dialog.setAttribute('aria-label',title);
+    dialog.innerHTML = '<h2></h2><form></form>';
+    document.body.append(dialog);
+    dialog.addEventListener('close',()=>dialog.remove(),{once:true});
+    edit(title,fields(search.value.trim()),saveRecord,{
+      dialog,
+      onSaved:entry=>{search.value='';populate(entry.id);apply?.(entry);select.focus();}
+    });
+  },controls);
 }
 
 function edital(row = {}) {
   edit(row.id ? 'Atualizar oportunidade' : 'Nova oportunidade',[
-    ['numero','Identificação do processo','text',row.numero],['orgao','Órgão comprador','text',row.orgao],
+    ['numero','Identificação do processo','text',row.numero],['orgao','Órgão comprador','select','',[]],
     ['modalidade','Modalidade ou procedimento','select',row.modalidade ?? modalities[0],modalities],
     ['sessao','Data da sessão','date',row.sessao],
     ['empresa_id','CNPJ participante','select',row.empresa_id ?? '',[['','A definir'],...db.empresas.map(e => [e.id,e.nome+' · '+e.cnpj])]],
     ['status','Situação','select',row.status ?? stages[0],stages],
     ['parecer','Parecer da equipe','text',row.parecer]
   ], values => {
+    const agency = values.orgao === 'atual' ? row.orgao : db.orgaos_compradores.find(entry=>entry.id===values.orgao)?.nome;
+    if (!agency) throw new Error('Selecione um órgão comprador do cadastro.');
     if (values.status === 'Aprovado' && !values.empresa_id) throw new Error('Escolha o CNPJ participante antes de aprovar.');
     if (['Aprovado','Reprovado'].includes(values.status) && !values.parecer.trim()) throw new Error('Registre o motivo da decisão.');
-    return save('editais',{...values,empresa_id:values.empresa_id || null,sessao:values.sessao || null},row.id);
-  });
+    return save('editais',{...values,orgao:agency,empresa_id:values.empresa_id || null,sessao:values.sessao || null},row.id);
+  },{decorate:form=>{
+    const cnpjLabel = entry=>entry.nome+' · '+entry.cnpj;
+    registryPicker(form,{name:'orgao',table:'orgaos_compradores',label:'Buscar órgão no cadastro',
+      placeholder:'Nome, CNPJ ou município',title:'Cadastrar órgão comprador',fields:nome=>agencyFields({nome}),
+      saveRecord:saveAgency,entryLabel:cnpjLabel,searchText:entry=>cnpjLabel(entry)+' '+entry.municipio,
+      initial:row.orgao?'atual':'',legacy:row.orgao});
+    registryPicker(form,{name:'empresa_id',table:'empresas',label:'Buscar CNPJ participante',
+      placeholder:'Nome ou CNPJ',title:'Cadastrar CNPJ participante',fields:nome=>companyFields({nome}),
+      saveRecord:saveCompany,entryLabel:cnpjLabel,searchText:cnpjLabel,initial:row.empresa_id??''});
+  }});
+}
+
+function catalogFields(row = {}) {
+  return [
+    ['codigo','Código','text',row.codigo],['descricao','Descrição','text',row.descricao],
+    ['tipo','Tipo','select',row.tipo ?? 'Produto',['Produto','Serviço']],['unidade','Unidade de medida','text',row.unidade],
+    ['marca','Marca','text',row.marca],['detalhes','Detalhes','text',row.detalhes],
+    ['observacao','Observações','text',row.observacao],['custo','Custo unitário (R$)','number',row.custo],
+    ['margem','Margem sugerida (%)','number',row.margem ?? 18]
+  ];
+}
+
+async function saveCatalog(values,id) {
+  for (const key of Object.keys(values)) values[key] = values[key].trim();
+  values.custo = Number(values.custo);
+  values.margem = Number(values.margem);
+  if (!values.codigo || !values.descricao || !values.unidade) throw new Error('Informe código, descrição e unidade.');
+  if (values.margem >= 100) throw new Error('A margem deve ser inferior a 100%.');
+  if (db.catalogo.some(entry=>entry.codigo===values.codigo && entry.id!==id)) throw new Error('Este código já está cadastrado.');
+  await save('catalogo',values,id);
+  return db.catalogo.find(entry=>entry.codigo===values.codigo);
 }
 
 function renderRegistry(view, agencies) {
@@ -186,36 +290,8 @@ function renderRegistry(view, agencies) {
     return;
   }
   function open(row = {}) {
-    const fields = agencies ? [
-      ['nome','Razão social / Nome do órgão','text',row.nome],
-      ['cnpj','CNPJ','text',row.cnpj],['municipio','Município','text',row.municipio],
-      ['uf','UF','select',row.uf ?? 'MG','AC AL AP AM BA CE DF ES GO MA MT MS MG PA PB PR PE PI RJ RN RS RO RR SC SP SE TO'.split(' ')],
-      ['email','E-mail institucional','email',row.email]
-    ] : [
-      ['codigo','Código','text',row.codigo],['descricao','Descrição','text',row.descricao],
-      ['tipo','Tipo','select',row.tipo ?? 'Produto',['Produto','Serviço']],['unidade','Unidade de medida','text',row.unidade],
-      ['marca','Marca','text',row.marca],['detalhes','Detalhes','text',row.detalhes],
-      ['observacao','Observações','text',row.observacao],['custo','Custo unitário (R$)','number',row.custo],
-      ['margem','Margem sugerida (%)','number',row.margem ?? 18]
-    ];
-    edit((row.id ? 'Editar ' : 'Cadastrar ')+singular,fields,async values => {
-      for (const key of Object.keys(values)) values[key] = values[key].trim();
-      if (agencies) {
-        values.cnpj = normalizeDocument(values.cnpj);
-        if (values.cnpj.length !== 14 || !validDocument(values.cnpj)) throw new Error('Informe um CNPJ válido.');
-        if (!values.nome || !values.municipio) throw new Error('Informe o órgão e o município.');
-      } else {
-        values.custo = Number(values.custo);
-        values.margem = Number(values.margem);
-        if (!values.codigo || !values.descricao || !values.unidade) throw new Error('Informe código, descrição e unidade.');
-        if (values.margem >= 100) throw new Error('A margem deve ser inferior a 100%.');
-      }
-      const key = agencies ? 'cnpj' : 'codigo';
-      if (db[table].some(entry => entry[key] === values[key] && entry.id !== row.id)) {
-        throw new Error(agencies ? 'Este CNPJ já está cadastrado.' : 'Este código já está cadastrado.');
-      }
-      await save(table,values,row.id);
-    });
+    edit((row.id ? 'Editar ' : 'Cadastrar ')+singular,agencies ? agencyFields(row) : catalogFields(row),
+      values=>agencies ? saveAgency(values,row.id) : saveCatalog(values,row.id));
   }
   writeAction('Cadastrar '+singular,()=>open(),section,true);
   section.insertAdjacentHTML('beforeend','<label>Buscar cadastro<input type="search"></label><div></div>');
@@ -241,17 +317,33 @@ function renderRegistry(view, agencies) {
 
 function item(row, previous = {}) {
   edit(previous.id ? 'Editar item da proposta' : 'Novo item da proposta',[
+    ['produto_catalogo','Produto ou serviço do catálogo','select','',[]],
     ['codigo','Código do item','text',previous.codigo],['descricao','Descrição','text',previous.descricao],
     ['quantidade','Quantidade solicitada','number',previous.quantidade],
     ['embalagem','Unidades por embalagem','number',previous.embalagem ?? 1],
     ['custo_embalagem','Custo por embalagem (R$)','number',previous.custo_embalagem],
     ['margem','Margem bruta desejada (%)','number',previous.margem ?? 18]
   ], values => {
+    delete values.produto_catalogo;
     for (const key of ['quantidade','embalagem','custo_embalagem','margem']) values[key] = Number(values[key]);
     if (values.quantidade <= 0 || values.embalagem <= 0 || values.margem >= 100) throw new Error('Quantidade e embalagem devem ser positivas. A margem deve ser inferior a 100%.');
     if (db.itens.some(x => x.edital_id === row.id && x.codigo === values.codigo && x.id !== previous.id)) throw new Error('Código já cadastrado nesta proposta.');
     return save('itens',{...values,edital_id:row.id},previous.id);
-  });
+  },{decorate:form=>{
+    form.elements.namedItem('produto_catalogo').required = false;
+    const label = entry=>entry.codigo+' · '+entry.descricao;
+    registryPicker(form,{name:'produto_catalogo',table:'catalogo',label:'Buscar produto ou serviço',
+      placeholder:'Código ou descrição',title:'Cadastrar produto ou serviço',fields:descricao=>catalogFields({descricao}),
+      saveRecord:saveCatalog,entryLabel:label,searchText:entry=>label(entry)+' '+(entry.marca??''),
+      apply:entry=>{
+        if (!entry) return;
+        const fields = form.elements;
+        if (!fields.namedItem('codigo').value) fields.namedItem('codigo').value = entry.codigo;
+        fields.namedItem('descricao').value = entry.descricao;
+        fields.namedItem('custo_embalagem').value = (Number(fields.namedItem('embalagem').value)||1)*Number(entry.custo);
+        fields.namedItem('margem').value = entry.margem;
+      }});
+  }});
 }
 
 function documentEditor(row, previous = {}) {
@@ -353,6 +445,36 @@ function renderProposalBoard(view) {
     grid.append(lane);
   }
   view.append(grid);
+}
+
+async function renderReadyProposals(view) {
+  const section = panel(view,'<h2>Propostas com documentação conferida</h2>');
+  if (!client) {
+    section.append('Os anexos estão disponíveis no sistema conectado.');
+    return;
+  }
+  const {data,error} = await client.from('anexos_proposta').select('edital_id').eq('grupo_id',group);
+  if (!section.isConnected) return;
+  if (error) {
+    if (!['PGRST205','42P01'].includes(error.code)) throw error;
+    section.append('O pacote de documentos aguarda a atualização do banco de dados.');
+    return;
+  }
+  const linked = new Set(data.map(row=>row.edital_id));
+  const ready = db.editais.filter(row=>{
+    if (row.status !== 'Aprovado' || !linked.has(row.id)) return false;
+    const docs = db.documentos.filter(doc=>doc.edital_id===row.id);
+    return docs.length && docs.every(doc=>doc.conferido) && db.itens.some(item=>item.edital_id===row.id);
+  });
+  if (!ready.length) section.append('Nenhuma proposta com itens, checklist conferido e arquivo anexado.');
+  for (const edital of ready) {
+    const card = panel(section,'<strong>'+escape(edital.numero)+'</strong><p>'+escape(edital.orgao)+'</p>');
+    action('Abrir pacote de envio',()=>{
+      activeEdital = edital.id;
+      detailMode = 'docs';
+      render();
+    },card,true);
+  }
 }
 
 const iconPaths = {
@@ -573,6 +695,7 @@ function render() {
   if (page === 'equipe' && groupRole() === 'admin') { renderTeam(view); return; }
   if (activeEdital) { renderProposal(view,db.editais.find(x => x.id === activeEdital)); return; }
   if (page === 'propostas') { renderProposalBoard(view); return; }
+  if (page === 'propostaPronta') { renderReadyProposals(view).catch(error=>message(error.message)); return; }
   if (page === 'documentacao') { renderEditalIndex(view,true); return; }
   if (page === 'relatorios') { renderReports(view); return; }
   if (page === 'orgaos' || page === 'catalogo') { renderRegistry(view,page === 'orgaos'); return; }
@@ -609,6 +732,86 @@ function render() {
   }
 }
 
+async function proposalAttachments(section,row,items) {
+  if (!row.empresa_id || !client) return;
+  const scope = {grupo_id:group,empresa_id:row.empresa_id,edital_id:row.id};
+  const [files,links] = await Promise.all([
+    client.from('arquivos_empresa').select('id,nome,validade').match({grupo_id:scope.grupo_id,empresa_id:scope.empresa_id}),
+    client.from('anexos_proposta').select('arquivo_id').match(scope)
+  ]);
+  if (!section.isConnected) return;
+  if (files.error || links.error) {
+    const error = files.error || links.error;
+    if (['PGRST205','42P01'].includes(error.code)) {
+      section.append('O envio de arquivos aguarda a atualização do banco de dados.');
+      return;
+    }
+    throw error;
+  }
+  const selected = new Set(links.data.map(link=>link.arquivo_id));
+  const list = panel(section,'<h3>Arquivos do CNPJ participante</h3>');
+  if (!files.data.length) list.append('Nenhum arquivo cadastrado.');
+  for (const file of files.data) {
+    const linked = selected.has(file.id);
+    const card = panel(list,'<strong>'+escape(file.nome)+'</strong><p>'+(linked?'Anexado à proposta':'Disponível para anexar')+'</p>');
+    writeAction(linked?'Desvincular':'Anexar à proposta',async()=>{
+      const values = {...scope,arquivo_id:file.id};
+      const {error} = await (linked
+        ? client.from('anexos_proposta').delete().match(values)
+        : client.from('anexos_proposta').upsert(values,{ignoreDuplicates:true}));
+      if (error) throw error;
+      if (section.isConnected) render();
+    },card);
+  }
+  if (canWrite()) {
+    section.insertAdjacentHTML('beforeend','<form><label>Adicionar PDF ao CNPJ<input type="file" name="arquivo" accept=".pdf" required></label><button type="submit">Salvar arquivo no cadastro</button><p role="alert"></p></form>');
+    const form = section.lastElementChild;
+    form.onsubmit = async event => {
+      event.preventDefault();
+      event.submitter.disabled = true;
+      const alert = form.querySelector('[role=alert]');
+      alert.textContent = '';
+      try {
+        const file = new FormData(form).get('arquivo');
+        if (!file.size || file.size > 5*1024*1024 || await file.slice(0,5).text() !== '%PDF-') {
+          throw new Error('Escolha um PDF válido de até 5 MB.');
+        }
+        const encoded = await new Promise((resolve,reject)=>{
+          const reader = new FileReader();
+          reader.onload = ()=>resolve(reader.result.split(',')[1]);
+          reader.onerror = ()=>reject(reader.error);
+          reader.readAsDataURL(file);
+        });
+        const {error} = await client.from('arquivos_empresa').insert({
+          grupo_id:scope.grupo_id,empresa_id:scope.empresa_id,nome:file.name,conteudo:encoded
+        });
+        if (error) throw error;
+        if (section.isConnected) render();
+      } catch(error) { alert.textContent = error.message; }
+      finally { event.submitter.disabled = false; }
+    };
+  }
+  const checklist = db.documentos.filter(doc=>doc.edital_id===row.id);
+  if (items.length && selected.size && checklist.length && checklist.every(doc=>doc.conferido)) {
+    action('Baixar ZIP da proposta',async()=>{
+      const {data,error} = await client.from('arquivos_empresa').select('id,nome,conteudo')
+        .match({grupo_id:scope.grupo_id,empresa_id:scope.empresa_id}).in('id',[...selected]);
+      if (error) throw error;
+      if (data.length !== selected.size) throw new Error('Um arquivo vinculado ficou indisponível.');
+      const empresa = db.empresas.find(entry=>entry.id===row.empresa_id);
+      const html = `<!doctype html><html lang="pt-BR"><meta charset="UTF-8"><title>Proposta inicial</title><h1>Proposta inicial</h1><p>${escape(row.numero)} · ${escape(row.orgao)}</p><p>${escape(empresa?.nome)} · ${escape(empresa?.cnpj)}</p><table><thead><tr><th>Item</th><th>Descrição</th><th>Quantidade</th><th>Preço unitário</th><th>Total</th></tr></thead><tbody>${items.map(item=>'<tr>'+[item.codigo,item.descricao,item.quantidade,money.format(price(item)),money.format(total([item]))].map(value=>'<td>'+escape(value)+'</td>').join('')+'</tr>').join('')}</tbody></table><p>Total: ${money.format(total(items))}</p></html>`;
+      const files = data.map((file,index)=>({name:'documentos/'+(index+1)+'-'+file.nome.replace(/[^\p{L}\p{N} ._-]/gu,'_'),bytes:Uint8Array.from(atob(file.conteudo),character=>character.charCodeAt(0))}));
+      const zip = makeZip([{name:'proposta-inicial.html',bytes:new TextEncoder().encode(html)},...files]);
+      const url = URL.createObjectURL(zip);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = 'proposta-'+row.numero.replace(/[^a-z0-9_-]/gi,'-')+'.zip';
+      link.click();
+      setTimeout(()=>URL.revokeObjectURL(url),30000);
+    },section,true);
+  }
+}
+
 function renderProposal(view,row) {
   const rows = db.itens.filter(x=>x.edital_id===row.id);
   const docs = db.documentos.filter(x=>x.edital_id===row.id);
@@ -632,6 +835,7 @@ function renderProposal(view,row) {
     const card=panel(checklist,'<strong>'+escape(doc.nome)+'</strong><p>'+escape(doc.conferido?'Conferido':'Pendente')+(doc.validade?' · validade '+escape(doc.validade):'')+'</p>');
     writeAction('Conferir',()=>documentEditor(row,doc),card);
   }
+  proposalAttachments(checklist,row,rows).catch(error=>{if(checklist.isConnected) message(error.message);});
 }
 
 async function loadGroups(){
@@ -644,6 +848,37 @@ async function loadGroups(){
   group=groups[0]?.id;
   await load();
 }
+
+const versionBanner = byId('version-notice');
+let checkingVersion = false;
+let availableVersion;
+async function checkVersion() {
+  if (checkingVersion || availableVersion) return;
+  checkingVersion = true;
+  try {
+    const response = await fetch(new URL('./index.html',import.meta.url),{cache:'no-store'});
+    if (!response.ok) return;
+    const next = new DOMParser().parseFromString(await response.text(),'text/html').querySelector('#app-entry');
+    if (!next) return;
+    const version = new URL(next.getAttribute('src'),response.url);
+    if (version.href === import.meta.url) return;
+    availableVersion = version.searchParams.get('v');
+    if (availableVersion) versionBanner.hidden = false;
+  } catch {
+    // A temporary connection error should leave the current version usable.
+  } finally {
+    checkingVersion = false;
+  }
+}
+versionBanner.querySelector('button').onclick = () => {
+  if (document.querySelector('dialog[open]')) return;
+  const url = new URL(location.href);
+  url.searchParams.set('v',availableVersion);
+  location.replace(url);
+};
+window.addEventListener('focus',checkVersion);
+window.setInterval(checkVersion,60000);
+void checkVersion();
 
 try {
   if(client){
