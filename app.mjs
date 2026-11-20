@@ -1460,36 +1460,88 @@ function navAction(key,label,run,parent) {
   button.setAttribute('aria-current',String(key === page || (key === 'painel' && page === 'relatorios')));
 }
 function renderOverview(view) {
-  const editais = db.editais;
-  const count = status => editais.filter(row => row.status === status).length;
-  const publishedProposals = new Set(db.itens.map(item => item.edital_id)).size;
-  const overview = document.createElement('section');
-  overview.className = 'overview-banner';
-  overview.innerHTML = `<div><span class="eyebrow">OPERAÇÃO DE LICITAÇÕES</span>
-    <h2>Editais e propostas,<br>na mesma direção.</h2>
-    <p>Acompanhe oportunidades, organize a documentação e prepare suas propostas.</p>
-    <div class="hero-buttons"></div></div>
-    <div class="banner-side">${[
-      ['Editais captados',count('Captado')],['Editais em análise',count('Em análise')],
-      ['Editais aprovados',count('Aprovado')],['Propostas com itens',publishedProposals]
-    ].map(([label,value])=>`<div><span>${label}</span><strong>${value}</strong></div>`).join('')}</div>`;
-  const controls = overview.querySelector('.hero-buttons');
-  const board = action('Abrir quadro de captação',()=>goTo('editais'),controls);
-  board.className = 'accent';
-  board.insertAdjacentHTML('beforeend',icon('arrow'));
-  action('Ver propostas',()=>goTo('propostas'),controls).className = 'outline-light';
-  action('Ver relatórios',()=>goTo('relatorios'),controls).className = 'outline-light';
-  view.append(overview);
-  const grid = document.createElement('section');
-  grid.className = 'grid overview-metrics';
-  for (const [label,value,detail,symbol] of [
-    ['Oportunidades cadastradas',editais.length,'Todos os editais da empresa','editais'],
-    ['Valor em propostas',money.format(total(db.itens)),'Soma dos itens cadastrados','propostas'],
-    ['CNPJs cadastrados',db.empresas.length,'Empresas e estabelecimentos','empresas']
-  ]) {
-    grid.insertAdjacentHTML('beforeend',`<div class="metric"><div><span>${label}</span><span class="metric-icon">${icon(symbol)}</span></div><strong>${escape(value)}</strong><small>${detail}</small></div>`);
+  const yearNow=new Intl.DateTimeFormat('pt-BR',{year:'numeric',timeZone:'America/Sao_Paulo'}).format(new Date());
+  const yearOf=row=>row.sessao?.slice(0,4) || row.numero?.match(/(?:^|[^0-9])((?:19|20)[0-9]{2})(?![0-9])/)?.[1] || '';
+  const years=[...new Set([yearNow,...db.editais.map(yearOf),...db.cotacoes.map(row=>row.criado_em?.slice(0,4))].filter(Boolean))].sort().reverse();
+  const filter=panel(view,'<label>Ano em vigor<select></select></label>');
+  const select=filter.querySelector('select');
+  for(const year of years) select.add(new Option(year,year));
+  select.add(new Option('Todos os anos','todos'));
+  select.add(new Option('Sem ano identificado','sem-ano'));
+  select.value=yearNow;
+  const summary=document.createElement('div');
+  view.append(summary);
+  function draw() {
+    summary.replaceChildren();
+    const selected=select.value;
+    const inYear=year=>selected==='todos' || (selected==='sem-ano'?!year:year===selected);
+    const editais=db.editais.filter(row=>inYear(yearOf(row)));
+    const ids=new Set(editais.map(row=>row.id));
+    const items=db.itens.filter(item=>ids.has(item.edital_id));
+    const disputes=db.disputas.filter(row=>ids.has(row.edital_id));
+    const disputeIds=new Set(disputes.map(row=>row.edital_id));
+    const waiting=editais.filter(row=>row.status==='Aprovado' && proposalStage(row)===5 && !disputeIds.has(row.id)).length;
+    const follow=db.acompanhamentos.filter(row=>ids.has(row.edital_id));
+    const followMap=new Map(follow.map(row=>[row.edital_id,row]));
+    const grouped=new Map();
+    for(const item of items) {
+      if(!grouped.has(item.edital_id)) grouped.set(item.edital_id,[]);
+      grouped.get(item.edital_id).push(item);
+    }
+    let won=0,lost=0,itemsWon=0,itemsLost=0,amount=0;
+    for(const dispute of disputes) {
+      const adjustments=followMap.get(dispute.edital_id)?.ajustes??{};
+      const results=(grouped.get(dispute.edital_id)??[]).map(item=>({item,result:adjustments[item.id]??dispute.resultados[item.id]}));
+      for(const {item,result} of results) {
+        if(result?.situacao==='Ganhamos') {
+          itemsWon++;
+          if(Number(result.preco_final)>0) amount+=Math.round(Number(result.preco_final)*item.quantidade*precision);
+        } else if(result?.situacao==='Perdemos') itemsLost++;
+      }
+      if(!results.length || !results.every(({result})=>disputeFinal(result?.situacao))) continue;
+      if(results.some(({result})=>result.situacao==='Ganhamos')) won++;
+      else if(results.some(({result})=>result.situacao==='Perdemos')) lost++;
+    }
+    const grid=document.createElement('section');
+    grid.className='grid overview-metrics';
+    for(const [label,value,detail,symbol] of [
+      ['Ano em vigor',select.selectedOptions[0].textContent,'Ano da sessão ou da referência do edital','relatorios'],
+      ['Disputas cadastradas',disputes.length+waiting,'Inclui propostas prontas que aguardam disputa','disputa'],
+      ['Valor em propostas',money.format(total(items)),'Soma das propostas cadastradas','propostas'],
+      ['Valor ganho',money.format(amount/precision),'Preço atualizado × quantidade dos itens ganhos','financeiro'],
+      ['Disputas ganhas',won,'Resultado completo com pelo menos um item ganho','disputa'],
+      ['Disputas perdidas',lost,'Resultado completo com perda e nenhum item ganho','disputa'],
+      ['Itens ganhos',itemsWon,'Resultado registrado como Ganhamos','propostas'],
+      ['Itens perdidos',itemsLost,'Resultado registrado como Perdemos','propostas']
+    ]) grid.insertAdjacentHTML('beforeend','<div class="metric"><div><span>'+label+'</span><span class="metric-icon">'+icon(symbol)+'</span></div><strong>'+escape(value)+'</strong><small>'+detail+'</small></div>');
+    summary.append(grid);
+    const section=panel(summary,'<h2>Resumo por tela</h2>');
+    const table=quoteTable(section,['Tela','Indicadores','Acesso']);
+    const byStage=(rows,names)=>names.map((name,index)=>name+' '+rows.filter(row=>row.etapa===index).length).join(' · ');
+    const quotes=db.cotacoes.filter(row=>inYear(row.criado_em?.slice(0,4)));
+    const proposals=editais.filter(row=>row.status==='Aprovado' || grouped.has(row.id));
+    const finalized=follow.filter(row=>row.finalizado_em).length;
+    const modules=[
+      ['editais',stages.map(status=>status+' '+editais.filter(row=>row.status===status).length).join(' · ')],
+      ['propostas',byStage(proposals.map(row=>({etapa:proposalStage(row)})),proposalStages)],
+      ['disputa',byStage([...disputes,...Array.from({length:waiting},()=>({etapa:0}))],disputeStages)],
+      ['acompanhamento',(disputes.filter(row=>row.etapa===2).length-finalized)+' processos em acompanhamento'],
+      ['finalizados',finalized+' processos arquivados'],
+      ['cotacoes',byStage(quotes.filter(row=>!isBudget(row)),quoteStages)],
+      ['orcamento',byStage(quotes.filter(isBudget),budgetStages)],
+      ['orgaos',db.orgaos_compradores.length+' órgãos e clientes cadastrados · total do cadastro'],
+      ['catalogo',db.catalogo.length+' produtos e serviços cadastrados · total do cadastro'],
+      ['financeiro',quotes.filter(row=>!isBudget(row)&&row.etapa===2).flatMap(row=>row.itens).filter(item=>item.preco!=null&&!item.aplicado_em).length+' preços recebidos aguardando aplicação']
+    ];
+    for(const [route,detail] of modules) {
+      const row=table.insertRow();
+      row.insertCell().textContent=screens[route];
+      row.insertCell().textContent=detail;
+      action('Abrir '+screens[route],()=>goTo(route),row.insertCell());
+    }
   }
-  view.append(grid);
+  select.onchange=draw;
+  draw();
 }
 
 function renderReports(view) {
