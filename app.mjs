@@ -74,7 +74,7 @@ function edit(title, fields, save, options = {}) {
       if (type === 'number') { field.step = 'any'; field.min = '0'; }
     }
     field.value = value ?? '';
-    field.required = !['sessao','validade','parecer','empresa_id','email','marca','detalhes','observacao','edital_url','local_disputa','edital_pdf'].includes(name);
+    field.required = !['sessao','validade','parecer','empresa_id','email','marca','detalhes','observacao','edital_url','local_disputa','edital_pdf','nome_fantasia','logradouro','numero_endereco','complemento','bairro','cep','telefone'].includes(name);
     if (type === 'file') field.accept = '.pdf,application/pdf';
     wrapper.append(field);
     form.append(wrapper);
@@ -177,10 +177,14 @@ function company() {
 
 function agencyFields(row = {}) {
   return [
+    ['cnpj','CNPJ','text',row.cnpj],
     ['nome','Razão social / Nome do órgão','text',row.nome],
-    ['cnpj','CNPJ','text',row.cnpj],['municipio','Município','text',row.municipio],
+    ['nome_fantasia','Nome fantasia','text',row.nome_fantasia],
+    ['logradouro','Logradouro','text',row.logradouro],['numero_endereco','Número do endereço','text',row.numero],
+    ['complemento','Complemento','text',row.complemento],['bairro','Bairro','text',row.bairro],
+    ['cep','CEP','text',row.cep],['municipio','Município','text',row.municipio],
     ['uf','UF','select',row.uf ?? 'MG','AC AL AP AM BA CE DF ES GO MA MT MS MG PA PB PR PE PI RJ RN RS RO RR SC SP SE TO'.split(' ')],
-    ['email','E-mail institucional','email',row.email]
+    ['email','E-mail institucional','email',row.email],['telefone','Telefone','tel',row.telefone]
   ];
 }
 
@@ -190,8 +194,56 @@ async function saveAgency(values,id) {
   if (values.cnpj.length !== 14 || !validDocument(values.cnpj)) throw new Error('Informe um CNPJ válido.');
   if (!values.nome || !values.municipio) throw new Error('Informe o órgão e o município.');
   if (db.orgaos_compradores.some(entry=>entry.cnpj===values.cnpj && entry.id!==id)) throw new Error('Este CNPJ já está cadastrado.');
-  await save('orgaos_compradores',values,id);
+  const {numero_endereco,...data} = values;
+  await save('orgaos_compradores',{...data,numero:numero_endereco},id);
   return db.orgaos_compradores.find(entry=>entry.cnpj===values.cnpj);
+}
+
+function agencyLookup(form) {
+  const cnpj = form.elements.namedItem('cnpj');
+  const controls = document.createElement('div');
+  controls.className = 'line';
+  cnpj.closest('label').after(controls);
+  const status = document.createElement('span');
+  status.setAttribute('role','status');
+  const button = action('Consultar CNPJ',async()=>{
+    const requested = normalizeDocument(cnpj.value);
+    if (requested.length !== 14 || !validDocument(requested)) {
+      status.textContent = 'Informe um CNPJ válido antes de consultar.';
+      cnpj.focus();
+      return;
+    }
+    button.disabled = true;
+    status.textContent = 'Consultando dados públicos do CNPJ…';
+    try {
+      const response = await fetch('https://brasilapi.com.br/api/cnpj/v1/'+encodeURIComponent(requested),
+        {signal:AbortSignal.timeout(12000)});
+      if (response.status === 404) throw new Error('CNPJ não encontrado. Confira o número ou preencha manualmente.');
+      if (!response.ok) throw new Error('Consulta indisponível. Tente novamente ou preencha manualmente.');
+      const data = await response.json();
+      if (!form.isConnected || !form.closest('dialog').open) return;
+      if (normalizeDocument(cnpj.value) !== requested) {
+        status.textContent = 'O CNPJ mudou. Consulte o novo número.';
+        return;
+      }
+      if (normalizeDocument(data.cnpj) !== requested || !data.razao_social) {
+        throw new Error('A consulta não retornou um cadastro válido para esse CNPJ.');
+      }
+      const fields = {
+        nome:data.razao_social,nome_fantasia:data.nome_fantasia,
+        logradouro:[data.descricao_tipo_de_logradouro,data.logradouro].filter(Boolean).join(' '),
+        numero_endereco:data.numero,complemento:data.complemento,bairro:data.bairro,
+        cep:data.cep,municipio:data.municipio,uf:data.uf,email:data.email,telefone:data.ddd_telefone_1
+      };
+      cnpj.value = requested;
+      for (const [name,value] of Object.entries(fields)) form.elements.namedItem(name).value = value ?? '';
+      status.textContent = 'Dados preenchidos pela BrasilAPI. Revise antes de salvar.';
+    } catch (error) {
+      status.textContent = error.name === 'TimeoutError' || error instanceof TypeError
+        ? 'Consulta indisponível. Tente novamente ou preencha manualmente.' : error.message;
+    } finally { button.disabled = false; }
+  },controls);
+  controls.append(status);
 }
 
 const normalizeSearch = value => value.toLocaleLowerCase('pt-BR').normalize('NFD').replace(/\p{Diacritic}/gu,'');
@@ -231,6 +283,7 @@ function registryPicker(form,{name,table,label,placeholder,title,fields,saveReco
     dialog.addEventListener('close',()=>dialog.remove(),{once:true});
     edit(title,fields(search.value.trim()),saveRecord,{
       dialog,
+      decorate:table === 'orgaos_compradores' ? agencyLookup : undefined,
       onSaved:entry=>{search.value='';populate(entry.id);apply?.(entry);select.focus();}
     });
   },controls);
@@ -360,7 +413,7 @@ function renderRegistry(view, agencies) {
   }
   function open(row = {}) {
     edit((row.id ? 'Editar ' : 'Cadastrar ')+singular,agencies ? agencyFields(row) : catalogFields(row),
-      values=>agencies ? saveAgency(values,row.id) : saveCatalog(values,row.id));
+      values=>agencies ? saveAgency(values,row.id) : saveCatalog(values,row.id),{decorate:agencies ? agencyLookup : undefined});
   }
   writeAction('Cadastrar '+singular,()=>open(),section,true);
   section.insertAdjacentHTML('beforeend','<label>Buscar cadastro<input type="search"></label><div></div>');
