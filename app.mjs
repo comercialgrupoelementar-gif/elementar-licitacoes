@@ -1022,29 +1022,44 @@ function printProposal(row,items) {
 }
 
 const importColumns = ['ITEM','QTD','UND','DESCRICAO_EDITAL','MARCA','CUSTO','MARGEM','FORNECEDOR','OBSERVACAO','CODIGO_CATALOGO','DESCRICAO_NA_PROPOSTA'];
-function importProposalItems(row) {
-  edit('Importar itens da proposta',[['planilha','Planilha XML do Excel','file']],async ({planilha})=>{
-    if (!planilha.size || planilha.size > 2*1024*1024) throw new Error('Selecione uma planilha XML de até 2 MB.');
-    const xml = new DOMParser().parseFromString(await planilha.text(),'application/xml');
-    const ns = 'urn:schemas-microsoft-com:office:spreadsheet';
-    const table = xml.getElementsByTagNameNS(ns,'Table')[0];
-    if (xml.querySelector('parsererror') || !table) throw new Error('Use o modelo XML de itens.');
-    const lines = [...table.getElementsByTagNameNS(ns,'Row')].map(line=>{
-      const cells = [];
-      for (const cell of line.getElementsByTagNameNS(ns,'Cell')) {
-        const index = Number(cell.getAttributeNS(ns,'Index') || cells.length+1);
-        if (!Number.isInteger(index) || index<=cells.length || index>importColumns.length) throw new Error('A planilha contém colunas fora do modelo.');
-        cells[index-1] = cell.textContent.trim();
-      }
-      return Array.from({length:importColumns.length},(_,index)=>cells[index]??'');
+async function readExcelItems(file) {
+  if (!globalThis.XLSX) {
+    await new Promise((resolve,reject)=>{
+      const script = document.createElement('script');
+      script.src = 'https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js';
+      script.onload = resolve;
+      script.onerror = ()=>{script.remove();reject(new Error('O leitor de Excel não carregou. Tente novamente.'));};
+      document.head.append(script);
     });
+  }
+  let book;
+  try {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    if (bytes[0] !== 0x50 || bytes[1] !== 0x4b || bytes[2] !== 0x03 || bytes[3] !== 0x04) throw new Error();
+    book = XLSX.read(bytes,{sheets:0,sheetRows:1002});
+  } catch {
+    throw new Error('O arquivo não é uma planilha .xlsx válida. Use o modelo do sistema.');
+  }
+  const sheet = book.Sheets[book.SheetNames[0]];
+  if (!sheet) throw new Error('A planilha está vazia.');
+  const rows = XLSX.utils.sheet_to_json(sheet,{header:1,defval:'',raw:true,blankrows:true});
+  if (rows.length > 1001) throw new Error('Importe até 1.000 itens por planilha.');
+  return rows.map(row=>row.map(value=>String(value).trim()));
+}
+
+function importProposalItems(row) {
+  edit('Importar itens da proposta',[['planilha','Planilha do Excel','file']],async ({planilha})=>{
+    if (!planilha.size || planilha.size > 2*1024*1024) throw new Error('Selecione uma planilha de até 2 MB.');
+    const isExcel = /\.xlsx$/i.test(planilha.name);
+    const lines = isExcel ? await readExcelItems(planilha) : readXmlItems(await planilha.text());
     if (lines.shift()?.join('|') !== importColumns.join('|')) throw new Error('Mantenha os nomes e a ordem das colunas do modelo.');
     const seen = new Set();
     const items = [];
     for (const [index,cells] of lines.entries()) {
       if (!cells.some(Boolean)) continue;
-      const [codigo,quantidade,unidade,descricao,marca_item,custo_embalagem,margem,fornecedor,observacao_item,catalogCode,source] = cells;
+      const [codigo,quantidade,unidade,descricao,marca_item,custo_embalagem,margem,fornecedor,observacao_item,catalogCode,source] = importColumns.map((_,column)=>cells[column]??'');
       try {
+        if (cells.slice(importColumns.length).some(Boolean)) throw new Error('Remova as colunas extras.');
         if (seen.has(codigo)) throw new Error('Número de item duplicado na planilha.');
         const product = db.catalogo.find(entry=>entry.codigo===catalogCode);
         if (catalogCode && !product) throw new Error('Código do catálogo não localizado: '+catalogCode);
@@ -1065,7 +1080,23 @@ function importProposalItems(row) {
       localStorage.setItem(localKey,JSON.stringify({...db,itens:updated}));
       db.itens = updated;
     }
-  },{decorate:form=>{form.elements.namedItem('planilha').accept='.xml,text/xml,application/xml';}});
+  },{decorate:form=>{form.elements.namedItem('planilha').accept='.xlsx,.xml';}});
+}
+
+function readXmlItems(text) {
+    const xml = new DOMParser().parseFromString(text,'application/xml');
+    const ns = 'urn:schemas-microsoft-com:office:spreadsheet';
+    const table = xml.getElementsByTagNameNS(ns,'Table')[0];
+    if (xml.querySelector('parsererror') || !table) throw new Error('Use o modelo XML de itens.');
+    return [...table.getElementsByTagNameNS(ns,'Row')].map(line=>{
+      const cells = [];
+      for (const cell of line.getElementsByTagNameNS(ns,'Cell')) {
+        const index = Number(cell.getAttributeNS(ns,'Index') || cells.length+1);
+        if (!Number.isInteger(index) || index<=cells.length || index>importColumns.length) throw new Error('A planilha contém colunas fora do modelo.');
+        cells[index-1] = cell.textContent.trim();
+      }
+      return Array.from({length:importColumns.length},(_,index)=>cells[index]??'');
+    });
 }
 
 function renderProposal(view,row) {
@@ -1074,8 +1105,8 @@ function renderProposal(view,row) {
   const section = panel(view,'<h2>Proposta · '+escape(row.numero)+'</h2><p>'+escape(row.orgao)+' · '+escape(db.empresas.find(e=>e.id===row.empresa_id)?.nome)+'</p><p>Total estimado <strong>'+money.format(total(rows))+'</strong></p>');
   if (row.status==='Aprovado') {
     writeAction('Adicionar item',()=>item(row),section,true);
-    writeAction('Importar planilha XML',()=>importProposalItems(row),section);
-    if (canWrite()) section.insertAdjacentHTML('beforeend',' <a href="./modelo-itens-proposta.xml" download>Baixar modelo XML</a>');
+    writeAction('Importar planilha Excel',()=>importProposalItems(row),section);
+    if (canWrite()) section.insertAdjacentHTML('beforeend',' <a href="./modelo-itens-proposta.xlsx" download>Baixar modelo Excel (.xlsx)</a>');
   }
   if (rows.length && row.empresa_id) action('Imprimir proposta',()=>printProposal(row,rows),section);
   const table = document.createElement('div');
