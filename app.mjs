@@ -139,16 +139,18 @@ async function save(table, values, id) {
   if (!client) {
     const records = db[table];
     const index = records.findIndex(record => record.id === id);
+    const recordId = index >= 0 ? id : crypto.randomUUID();
     if (index >= 0) records[index] = {...records[index],...values};
-    else records.push({...values,id:crypto.randomUUID()});
+    else records.push({...values,id:recordId,...(table==='catalogo' ? {codigo:'CAT-'+recordId} : {})});
     localStorage.setItem(localKey,JSON.stringify(db));
-    return;
+    return recordId;
   }
   const query = client.from(table);
   const request = id ? query.update(values).eq('grupo_id',group).eq('id',id) : query.insert({...values,grupo_id:group});
-  const {error} = await request.select('id').single();
+  const {data,error} = await request.select('id').single();
   if (error) throw error;
   await load();
+  return data.id;
 }
 
 const groupRole = () => groups.find(item => item.id === group)?.role;
@@ -388,7 +390,7 @@ async function downloadEdital(row) {
 
 function catalogFields(row = {}) {
   return [
-    ['codigo','Código','text',row.codigo],['descricao','Descrição','text',row.descricao],
+    ['descricao','Descrição','text',row.descricao],
     ['tipo','Tipo','select',row.tipo ?? 'Produto',['Produto','Serviço']],['unidade','Unidade de medida','text',row.unidade],
     ['marca','Marca','text',row.marca],['detalhes','Detalhes','text',row.detalhes],
     ['observacao','Observações','text',row.observacao],['custo','Custo unitário (R$)','number',row.custo],
@@ -396,15 +398,21 @@ function catalogFields(row = {}) {
   ];
 }
 
+function catalogValues(values) {
+  const record = Object.fromEntries(Object.entries(values).map(([key,value])=>[key,value.trim()]));
+  if (!record.descricao || !record.unidade) throw new Error('Informe descrição e unidade.');
+  if (!['Produto','Serviço'].includes(record.tipo)) throw new Error('Informe Produto ou Serviço no tipo.');
+  for (const key of ['custo','margem']) {
+    if (!/^\d+(?:[.,]\d+)?$/.test(record[key])) throw new Error('Informe custo e margem como números.');
+    record[key] = Number(record[key].replace(',','.'));
+  }
+  if (!Number.isFinite(record.custo) || record.margem >= 100) throw new Error('Confira o custo e informe uma margem inferior a 100%.');
+  return record;
+}
+
 async function saveCatalog(values,id) {
-  for (const key of Object.keys(values)) values[key] = values[key].trim();
-  values.custo = Number(values.custo);
-  values.margem = Number(values.margem);
-  if (!values.codigo || !values.descricao || !values.unidade) throw new Error('Informe código, descrição e unidade.');
-  if (values.margem >= 100) throw new Error('A margem deve ser inferior a 100%.');
-  if (db.catalogo.some(entry=>entry.codigo===values.codigo && entry.id!==id)) throw new Error('Este código já está cadastrado.');
-  await save('catalogo',values,id);
-  return db.catalogo.find(entry=>entry.codigo===values.codigo);
+  const recordId = await save('catalogo',catalogValues(values),id);
+  return db.catalogo.find(entry=>entry.id===recordId);
 }
 
 function renderRegistry(view, agencies) {
@@ -421,6 +429,10 @@ function renderRegistry(view, agencies) {
       values=>agencies ? saveAgency(values,row.id) : saveCatalog(values,row.id),{decorate:agencies ? agencyLookup : undefined});
   }
   writeAction('Cadastrar '+singular,()=>open(),section,true);
+  if (!agencies && canWrite()) {
+    action('Importar catálogo Excel',importCatalog,section);
+    section.insertAdjacentHTML('beforeend',' <a href="./modelo-cadastro-produtos-servicos.xlsx" download>Baixar modelo do catálogo (.xlsx)</a>');
+  }
   section.insertAdjacentHTML('beforeend','<label>Buscar cadastro<input type="search"></label><div></div>');
   const search = section.querySelector('input');
   const list = section.lastElementChild;
@@ -1005,7 +1017,7 @@ function proposalHtml(row,items,empresa) {
   ${row.sessao?'<p><b>Data da sessão</b> '+escape(row.sessao.split('-').reverse().join('/'))+'</p>':''}
   ${row.local_disputa?'<p><b>Local ou portal da disputa</b> '+escape(row.local_disputa)+'</p>':''}
   <p><b>Objeto</b> ${escape(row.objeto)}</p>
-  <table><thead><tr><th>Item</th><th>Qtde.</th><th>Und.</th><th>Descrição do material ou serviço</th><th>Marca</th><th>Valor unit.</th><th>Valor total</th></tr></thead><tbody>${items.map(item=>'<tr>'+[item.codigo,item.quantidade,item.unidade,printedDescription(item),item.marca,money.format(price(item)),money.format(total([item]))].map(value=>'<td>'+escape(value)+'</td>').join('')+'</tr>').join('')}</tbody></table>
+  <table><thead><tr><th>Item</th><th>Código interno</th><th>Qtde.</th><th>Und.</th><th>Descrição do material ou serviço</th><th>Marca</th><th>Valor unit.</th><th>Valor total</th></tr></thead><tbody>${items.map(item=>'<tr>'+[item.codigo,catalogCode(item),item.quantidade,item.unidade,printedDescription(item),item.marca,money.format(price(item)),money.format(total([item]))].map(value=>'<td>'+escape(value)+'</td>').join('')+'</tr>').join('')}</tbody></table>
   <p><strong>Valor total da proposta: ${money.format(total(items))}</strong></p><footer>Gerado pelo E-Lementar Licitações</footer></html>`;
 }
 
@@ -1022,6 +1034,38 @@ function printProposal(row,items) {
 }
 
 const importColumns = ['ITEM','QTD','UND','DESCRICAO_EDITAL','MARCA','CUSTO','MARGEM','FORNECEDOR','OBSERVACAO','CODIGO_CATALOGO','DESCRICAO_NA_PROPOSTA'];
+const catalogColumns = ['DESCRICAO','TIPO','UNIDADE','MARCA','DETALHES','OBSERVACAO','CUSTO','MARGEM'];
+const catalogCode = item=>db.catalogo.find(entry=>entry.id===item.catalogo_id)?.codigo??'';
+
+function importCatalog() {
+  edit('Importar catálogo de produtos e serviços',[['planilha','Planilha do catálogo (.xlsx)','file']],async ({planilha})=>{
+    if (!/\.xlsx$/i.test(planilha.name) || !planilha.size || planilha.size>2*1024*1024) throw new Error('Selecione uma planilha .xlsx de até 2 MB.');
+    const lines = await readExcelItems(planilha);
+    if (lines.shift()?.join('|') !== catalogColumns.join('|')) throw new Error('Use os cabeçalhos do modelo do catálogo.');
+    const records = [];
+    for (const [index,cells] of lines.entries()) {
+      if (!cells.some(Boolean)) continue;
+      try {
+        if (cells.slice(catalogColumns.length).some(Boolean)) throw new Error('Remova as colunas extras.');
+        const [descricao,tipo,unidade,marca,detalhes,observacao,custo,margem] = catalogColumns.map((_,column)=>cells[column]??'');
+        records.push(catalogValues({descricao,tipo,unidade,marca,detalhes,observacao,custo,margem}));
+      } catch(error) { throw new Error('Linha '+(index+2)+': '+error.message); }
+    }
+    if (!records.length) throw new Error('Inclua pelo menos um produto ou serviço.');
+    if (client) {
+      const {error} = await client.from('catalogo').insert(records.map(record=>({...record,grupo_id:group})),{defaultToNull:false});
+      if (error) throw error;
+      await load();
+    } else {
+      const updated = [...db.catalogo,...records.map(record=>{
+        const id = crypto.randomUUID();
+        return {...record,id,codigo:'CAT-'+id};
+      })];
+      localStorage.setItem(localKey,JSON.stringify({...db,catalogo:updated}));
+      db.catalogo = updated;
+    }
+  },{decorate:form=>{form.elements.namedItem('planilha').accept='.xlsx';}});
+}
 async function readExcelItems(file) {
   if (!globalThis.XLSX) {
     await new Promise((resolve,reject)=>{
@@ -1111,11 +1155,11 @@ function renderProposal(view,row) {
   if (rows.length && row.empresa_id) action('Imprimir proposta',()=>printProposal(row,rows),section);
   const table = document.createElement('div');
   table.className = 'scroll';
-  table.innerHTML = '<table><thead><tr><th>Item</th><th>Descrição</th><th>Qtde.</th><th>Und.</th><th>Marca</th><th>Custo unitário</th><th>Margem</th><th>Fornecedor</th><th>Observação</th><th>Preço proposto</th><th>Total</th><th>Ações</th></tr></thead><tbody></tbody></table>';
+  table.innerHTML = '<table><thead><tr><th>Item</th><th>Código interno</th><th>Descrição</th><th>Qtde.</th><th>Und.</th><th>Marca</th><th>Custo unitário</th><th>Margem</th><th>Fornecedor</th><th>Observação</th><th>Preço proposto</th><th>Total</th><th>Ações</th></tr></thead><tbody></tbody></table>';
   section.append(table);
   for (const entry of rows) {
     const tr = table.querySelector('tbody').insertRow();
-    for (const value of [entry.codigo,printedDescription(entry),entry.quantidade,entry.unidade,entry.marca,(entry.custo_embalagem/entry.embalagem).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:4}),entry.margem+'%',entry.fornecedor,entry.observacao,money.format(price(entry)),money.format(total([entry]))]) tr.insertCell().textContent=value;
+    for (const value of [entry.codigo,catalogCode(entry),printedDescription(entry),entry.quantidade,entry.unidade,entry.marca,(entry.custo_embalagem/entry.embalagem).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:4}),entry.margem+'%',entry.fornecedor,entry.observacao,money.format(price(entry)),money.format(total([entry]))]) tr.insertCell().textContent=value;
     const controls=tr.insertCell();
     if(row.status==='Aprovado') writeAction('Editar',()=>item(row,entry),controls);
   }
