@@ -968,6 +968,7 @@ const disputeResults=['Sem resultado','Estamos liderando','Concorrente liderando
 const disputeFinal=s=>disputeResults.slice(3).includes(s);
 const unitCost=item=>Number(item.custo_embalagem)/Number(item.embalagem);
 const bidFloor=(cost,margin)=>Math.ceil((cost/(1-margin/100)-1e-12)*precision)/precision;
+const suggestedBid=(item,margin)=>Math.min(price(item),roundPrice(unitCost(item)/(1-margin/100)));
 const bidMargin=(cost,bid)=>bid>0?(1-cost/bid)*100:null;
 const disputeItems=row=>db.itens.filter(item=>item.edital_id===row.id);
 
@@ -1032,7 +1033,7 @@ function editDisputeItem(view,row,record,item) {
       const fields=form.elements;
       const margin=Number(fields.namedItem('margem').value);
       const lance=Number(fields.namedItem('lance').value);
-      preview.textContent=margin>=0 && margin<100?'Piso '+money.format(bidFloor(unitCost(item),record.margem_minima))+' · Lance pela margem '+money.format(bidFloor(unitCost(item),margin))+(lance>0?' · Margem do lance '+decimal.format(bidMargin(unitCost(item),lance))+'%':''):'Informe uma margem menor que 100%.';
+      preview.textContent=margin>=0 && margin<100?'Piso '+money.format(bidFloor(unitCost(item),record.margem_minima))+' · Lance pela margem '+money.format(suggestedBid(item,margin))+(lance>0?' · Margem do lance '+decimal.format(bidMargin(unitCost(item),lance))+'%':''):'Informe uma margem menor que 100%.';
     };
     form.addEventListener('input',update);
     update();
@@ -1058,13 +1059,14 @@ function openDispute(view,row) {
       const floor=grouped.reduce((sum,item)=>sum+bidFloor(unitCost(item),record.margem_minima)*item.quantidade,0);
       section.insertAdjacentHTML('beforeend','<h3>Lote '+escape(lot)+' · Piso total '+money.format(floor)+'</h3>');
     }
-    const table=quoteTable(section,['Item','Descrição','Qtd.','Custo unit.','Proposta inicial','Piso unit.','Margem (%)','Lance sugerido','Farol da margem','Nosso lance','Liderança','Resultado','Fornecedor vencedor','Preço vencedor','Total vencedor','Diferença para nosso lance (R$)','Diferença para nosso lance (%)','Nossa margem no preço vencedor','Auditoria','Ação']);
+    const table=quoteTable(section,['Item','Descrição','Qtd.','Custo unit.','Proposta inicial','Margem inicial (%)','Piso unit.','Margem para simulação (%)','Lance sugerido','Farol da margem','Nosso lance','Liderança','Resultado','Fornecedor vencedor','Preço vencedor','Total vencedor','Diferença para nosso lance (R$)','Diferença para nosso lance (%)','Nossa margem no preço vencedor','Auditoria','Ação']);
     table.closest('table').classList.add('dispute-table');
     for(const item of grouped) {
       const result=record.resultados[item.id]??{};
       const cost=unitCost(item);
       const floor=bidFloor(cost,record.margem_minima);
-      const initialMargin=result.margem??item.margem;
+      const initialMargin=Number(item.margem);
+      const simulationMargin=result.margem??initialMargin;
       const final=result.preco_final==null?null:roundPrice(result.preco_final*item.quantidade);
       const audit=result.situacao==='Ganhamos'&&result.preco_final<floor?'Ganho abaixo do mínimo':result.situacao==='Perdemos'&&result.preco_final>=floor?'Perdido acima do mínimo':'—';
       if(result.situacao==='Ganhamos') {won++;wonTotal+=final??0;}
@@ -1078,7 +1080,7 @@ function openDispute(view,row) {
       summary.textContent=printedDescription(item);
       summary.title=summary.textContent;
       description.append(summary);
-      for(const value of [decimal.format(item.quantidade),money.format(cost),money.format(price(item)),money.format(floor)]) tr.insertCell().textContent=value;
+      for(const value of [decimal.format(item.quantidade),money.format(cost),money.format(price(item)),decimal.format(initialMargin)+'%',money.format(floor)]) tr.insertCell().textContent=value;
       const marginCell=tr.insertCell();
       const suggestion=tr.insertCell();
       const signal=tr.insertCell();
@@ -1103,15 +1105,18 @@ function openDispute(view,row) {
       controls.className='dispute-actions';
       function preview(margin) {
         const valid=margin!==null && margin>=0 && margin<100;
-        const color=!valid?'':margin<record.margem_minima?'Vermelho':margin<=Number(record.margem_minima)+Number(record.alerta)?'Amarelo':'Verde';
-        suggestion.textContent=valid?money.format(bidFloor(cost,margin)):'—';
-        signal.textContent=color?color+' · '+decimal.format(margin)+'%':'—';
+        const bid=valid?suggestedBid(item,margin):null;
+        const effective=bidMargin(cost,bid);
+        const color=effective==null?'':effective+1e-8<record.margem_minima?'Vermelho':effective<=Number(record.margem_minima)+Number(record.alerta)+1e-8?'Amarelo':'Verde';
+        const capped=valid && roundPrice(cost/(1-margin/100))>price(item);
+        suggestion.textContent=valid?money.format(bid)+(capped?' · limite inicial':''):'—';
+        signal.textContent=color?color+' · '+decimal.format(effective)+'%':'—';
         signal.style.backgroundColor=color?{Vermelho:'#fee2e2',Amarelo:'#fef3c7',Verde:'#dcfce7'}[color]:'';
       }
-      preview(Number(initialMargin));
+      preview(Number(simulationMargin));
       finalTotal.textContent=final==null?'—':money.format(final);
       if(page!=='disputa' || record.etapa!==1 || !canWrite()) {
-        marginCell.textContent=decimal.format(initialMargin);
+        marginCell.textContent=decimal.format(simulationMargin);
         ourBidCell.textContent=result.lance==null?'—':money.format(result.lance)+' · '+decimal.format(bidMargin(cost,result.lance))+'%';
         outcome.textContent=result.situacao||'Sem resultado';
         winner.textContent=result.situacao==='Ganhamos'?company:result.vencedor||'—';
@@ -1128,7 +1133,7 @@ function openDispute(view,row) {
         cell.append(input);
         return input;
       };
-      const margin=makeInput(marginCell,'Margem','number',initialMargin);
+      const margin=makeInput(marginCell,'Margem','number',simulationMargin);
       const ourBid=makeInput(ourBidCell,'Nosso lance final','number',result.lance);
       const status=document.createElement('select');
       status.setAttribute('aria-label','Resultado do item '+item.codigo);
