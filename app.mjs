@@ -74,7 +74,8 @@ function edit(title, fields, save, options = {}) {
       if (type === 'number') { field.step = 'any'; field.min = '0'; }
     }
     field.value = value ?? '';
-    field.required = !['sessao','validade','parecer','empresa_id','email','marca','detalhes','observacao'].includes(name);
+    field.required = !['sessao','validade','parecer','empresa_id','email','marca','detalhes','observacao','edital_url','local_disputa','edital_pdf'].includes(name);
+    if (type === 'file') field.accept = '.pdf,application/pdf';
     wrapper.append(field);
     form.append(wrapper);
   }
@@ -118,7 +119,9 @@ async function load() {
     unavailableRegistries.clear();
     return;
   }
-  const responses = await Promise.all(allTables.map(table => client.from(table).select().eq('grupo_id',group)));
+  const responses = await Promise.all(allTables.map(table => client.from(table).select(table === 'editais'
+    ? 'id,grupo_id,empresa_id,numero,numero_pregao,orgao,modalidade,sessao,status,parecer,edital_url,local_disputa,edital_pdf_nome'
+    : '*').eq('grupo_id',group)));
   const missing = new Set();
   responses.forEach(({error},i) => {
     if (!error) return;
@@ -235,19 +238,49 @@ function registryPicker(form,{name,table,label,placeholder,title,fields,saveReco
 
 function edital(row = {}) {
   edit(row.id ? 'Atualizar oportunidade' : 'Nova oportunidade',[
-    ['numero','Identificação do processo','text',row.numero],['orgao','Órgão comprador','select','',[]],
+    ['numero','Número do processo','text',row.numero],
+    ['numero_pregao','Número do pregão','text',row.numero_pregao],
+    ['orgao','Órgão comprador','select','',[]],
     ['modalidade','Modalidade ou procedimento','select',row.modalidade ?? modalities[0],modalities],
+    ['edital_url','Link da publicação do edital','url',row.edital_url],
+    ['local_disputa','Local ou portal da disputa','text',row.local_disputa],
+    ['edital_pdf','Anexar edital em PDF','file'],
     ['sessao','Data da sessão','date',row.sessao],
     ['empresa_id','CNPJ participante','select',row.empresa_id ?? '',[['','A definir'],...db.empresas.map(e => [e.id,e.nome+' · '+e.cnpj])]],
     ['status','Situação','select',row.status ?? stages[0],stages],
     ['parecer','Parecer da equipe','text',row.parecer]
-  ], values => {
+  ], async values => {
     const agency = values.orgao === 'atual' ? row.orgao : db.orgaos_compradores.find(entry=>entry.id===values.orgao)?.nome;
     if (!agency) throw new Error('Selecione um órgão comprador do cadastro.');
     if (values.status === 'Aprovado' && !values.empresa_id) throw new Error('Escolha o CNPJ participante antes de aprovar.');
     if (['Aprovado','Reprovado'].includes(values.status) && !values.parecer.trim()) throw new Error('Registre o motivo da decisão.');
-    return save('editais',{...values,orgao:agency,empresa_id:values.empresa_id || null,sessao:values.sessao || null},row.id);
+    const numero = values.numero.trim();
+    if (!numero) throw new Error('Informe o número do processo.');
+    const numeroPregao = values.modalidade.startsWith('Pregão ') ? values.numero_pregao.trim() : '';
+    if (values.modalidade.startsWith('Pregão ') && !numeroPregao && (!row.id || row.modalidade !== values.modalidade || row.numero_pregao)) {
+      throw new Error('Informe o número do pregão.');
+    }
+    const {edital_pdf:file,...data} = values;
+    const editalUrl = data.edital_url.trim();
+    if (editalUrl && !safeWebUrl(editalUrl)) throw new Error('Informe um link HTTP ou HTTPS para o edital.');
+    if (file.size) {
+      data.edital_pdf = await encodePdf(file);
+      data.edital_pdf_nome = file.name;
+    }
+    return save('editais',{...data,numero,numero_pregao:numeroPregao || null,edital_url:editalUrl || null,
+      local_disputa:data.local_disputa.trim() || null,orgao:agency,empresa_id:values.empresa_id || null,sessao:values.sessao || null},row.id);
   },{decorate:form=>{
+    if (row.edital_pdf_nome) form.elements.namedItem('edital_pdf').closest('label').append('Arquivo atual: '+row.edital_pdf_nome);
+    const modalidade = form.elements.namedItem('modalidade');
+    const pregao = form.elements.namedItem('numero_pregao');
+    const syncPregao = () => {
+      const visible = modalidade.value.startsWith('Pregão ');
+      pregao.closest('label').hidden = !visible;
+      pregao.closest('label').style.display = visible ? '' : 'none';
+      pregao.required = visible && (!row.id || row.modalidade !== modalidade.value || Boolean(row.numero_pregao));
+    };
+    modalidade.addEventListener('change',syncPregao);
+    syncPregao();
     const cnpjLabel = entry=>entry.nome+' · '+entry.cnpj;
     registryPicker(form,{name:'orgao',table:'orgaos_compradores',label:'Buscar órgão no cadastro',
       placeholder:'Nome, CNPJ ou município',title:'Cadastrar órgão comprador',fields:nome=>agencyFields({nome}),
@@ -257,6 +290,42 @@ function edital(row = {}) {
       placeholder:'Nome ou CNPJ',title:'Cadastrar CNPJ participante',fields:nome=>companyFields({nome}),
       saveRecord:saveCompany,entryLabel:cnpjLabel,searchText:cnpjLabel,initial:row.empresa_id??''});
   }});
+}
+
+function safeWebUrl(value) {
+  try {
+    const url = new URL(value);
+    return ['http:','https:'].includes(url.protocol) ? url.href : '';
+  } catch { return ''; }
+}
+
+async function encodePdf(file) {
+  if (!file.size || file.size > 5*1024*1024 || await file.slice(0,5).text() !== '%PDF-') {
+    throw new Error('Escolha um PDF válido de até 5 MB.');
+  }
+  return new Promise((resolve,reject)=>{
+    const reader = new FileReader();
+    reader.onload = ()=>resolve(reader.result.split(',')[1]);
+    reader.onerror = ()=>reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+}
+
+async function downloadEdital(row) {
+  let stored = row;
+  if (client) {
+    const {data,error} = await client.from('editais').select('edital_pdf,edital_pdf_nome').eq('grupo_id',group).eq('id',row.id).single();
+    if (error) throw error;
+    stored = data;
+  }
+  if (!stored.edital_pdf) throw new Error('O edital anexado está indisponível.');
+  const bytes = Uint8Array.from(atob(stored.edital_pdf),character=>character.charCodeAt(0));
+  const url = URL.createObjectURL(new Blob([bytes],{type:'application/pdf'}));
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = stored.edital_pdf_nome || 'edital.pdf';
+  link.click();
+  setTimeout(()=>URL.revokeObjectURL(url),30000);
 }
 
 function catalogFields(row = {}) {
@@ -723,9 +792,13 @@ function render() {
       lane.innerHTML = '<h3>'+escape(stage)+' · '+rows.length+'</h3>';
       grid.append(lane);
       for (const row of rows) {
-        const card = panel(lane,'<strong>'+escape(row.numero)+'</strong><p>'+escape(row.orgao)+'</p><p class="muted">'+escape(row.modalidade)+'</p>');
+        const card = panel(lane,'<strong>Processo '+escape(row.numero)+'</strong><p>'+escape(row.orgao)+'</p><p class="muted">'+escape(row.modalidade)+(row.numero_pregao?' · Nº '+escape(row.numero_pregao):'')+'</p>');
         card.classList.add('card');
         writeAction('Analisar',()=>edital(row),card);
+        if (row.local_disputa) card.insertAdjacentHTML('beforeend','<p>Disputa: '+escape(row.local_disputa)+'</p>');
+        const editalUrl = safeWebUrl(row.edital_url);
+        if (editalUrl) card.insertAdjacentHTML('beforeend','<p><a href="'+escape(editalUrl)+'" target="_blank" rel="noopener noreferrer">Abrir publicação do edital</a></p>');
+        if (row.edital_pdf_nome) action('Baixar edital',()=>downloadEdital(row),card);
         if (row.status==='Aprovado' || db.itens.some(x=>x.edital_id===row.id)) action('Abrir proposta',()=>{detailMode=null;activeEdital=row.id;render();},card,true);
       }
     }
