@@ -1070,7 +1070,14 @@ function openDispute(view,row) {
       const leader=result.situacao==='Estamos liderando'?'Nossa empresa':[result.concorrente,result.lance_concorrente==null?'':money.format(result.lance_concorrente)].filter(Boolean).join(' · ');
       const company=db.empresas.find(e=>e.id===row.empresa_id)?.nome||'Nossa empresa';
       const tr=table.insertRow();
-      for(const value of [item.codigo,printedDescription(item),decimal.format(item.quantidade),money.format(cost),money.format(price(item)),money.format(floor)]) tr.insertCell().textContent=value;
+      tr.insertCell().textContent=item.codigo;
+      const description=tr.insertCell();
+      const summary=document.createElement('span');
+      summary.className='dispute-description';
+      summary.textContent=printedDescription(item);
+      summary.title=summary.textContent;
+      description.append(summary);
+      for(const value of [decimal.format(item.quantidade),money.format(cost),money.format(price(item)),money.format(floor)]) tr.insertCell().textContent=value;
       const marginCell=tr.insertCell();
       const suggestion=tr.insertCell();
       const signal=tr.insertCell();
@@ -1092,6 +1099,7 @@ function openDispute(view,row) {
       const auditCell=tr.insertCell();
       auditCell.textContent=audit;
       const controls=tr.insertCell();
+      controls.className='dispute-actions';
       function preview(margin) {
         const valid=margin!==null && margin>=0 && margin<100;
         const color=!valid?'':margin<record.margem_minima?'Vermelho':margin<=Number(record.margem_minima)+Number(record.alerta)?'Amarelo':'Verde';
@@ -1986,3 +1994,22 @@ try {
   } else await load();
   render();
 } catch(error) { render(); message(error.message); }
+
+function clampWorkspaceText() {
+  for (const cell of byId('view').querySelectorAll('tbody td')) {
+    if (cell.childElementCount || !cell.textContent.trim()) continue;
+    const text=document.createElement('span');
+    text.className='workspace-text-preview';
+    text.textContent=cell.textContent;
+    text.title=text.textContent;
+    cell.replaceChildren(text);
+  }
+  for (const text of byId('view').querySelectorAll('.card p,.card strong')) {
+    if (text.childElementCount || !text.textContent.trim()) continue;
+    text.classList.add('workspace-card-preview');
+    text.title=text.textContent;
+  }
+}
+const workspaceTextObserver=new MutationObserver(clampWorkspaceText);
+workspaceTextObserver.observe(byId('view'),{childList:true,subtree:true});
+clampWorkspaceText();
