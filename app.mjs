@@ -1262,9 +1262,9 @@ async function updateFollow(record,values) {
   await load();
 }
 
-function followAttach(view,row,record,kind='Ata') {
+function followAttach(view,row,record,kind='Ata',types=followTypes) {
   edit('Anexar documento do processo',[
-    ['tipo','Tipo de documento','select',kind,followTypes],
+    ['tipo','Tipo de documento','select',kind,types],
     ['nome','Nome do documento','text',''],
     ['arquivo','Arquivo PDF','file']
   ],async values=>{
@@ -1305,8 +1305,7 @@ function openFollow(view,row) {
   if(!locked) {
     writeAction('Anexar ata ou documento',()=>followAttach(view,row,record),docs);
     if(ready) writeAction('Anexar proposta readequada assinada',()=>followAttach(view,row,record,'Proposta assinada'),docs);
-    writeAction('Anexar contrato',()=>followAttach(view,row,record,'Contrato'),docs);
-    writeAction('Anexar ARP',()=>followAttach(view,row,record,'ARP'),docs);
+    writeAction('Anexar contrato ou ARP',()=>followAttach(view,row,record,'Contrato',['Contrato','ARP']),docs);
     if(ready) docs.insertAdjacentHTML('beforeend','<p>Assine o PDF digitalmente ou à mão, anexe a via assinada e envie pelo canal indicado pelo órgão.</p>');
   }
   if(record) loadFollowFiles(docs,record).catch(error=>message(error.message));
