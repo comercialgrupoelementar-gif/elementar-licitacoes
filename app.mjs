@@ -11,7 +11,7 @@ const byId = id => document.getElementById(id);
 const escape = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const message = text => { byId('notice').textContent = text; };
 const tables = ['empresas','editais','itens','documentos'];
-const registryTables = ['orgaos_compradores','catalogo','cotacoes','disputas'];
+const registryTables = ['orgaos_compradores','catalogo','cotacoes','disputas','acompanhamentos'];
 const allTables = [...tables,...registryTables];
 const db = Object.fromEntries(allTables.map(table => [table,[]]));
 const unavailableRegistries = new Set();
@@ -1049,7 +1049,7 @@ function openDispute(view,row) {
     if(record.etapa<2) writeAction('Configurar farol',()=>disputeRules(view,row,record),section);
     if(record.etapa===0) writeAction('Iniciar disputa',async()=>{await moveDispute(row,record,1);openDispute(view,row);},section,true);
     if(record.etapa===1) writeAction('Enviar para acompanhamento',async()=>{await moveDispute(row,record,2);openDispute(view,row);},section,true);
-    if(record.etapa===2) writeAction('Reabrir disputa',async()=>{await moveDispute(row,record,1);openDispute(view,row);},section);
+    if(record.etapa===2 && !getFollow(row)) writeAction('Reabrir disputa',async()=>{await moveDispute(row,record,1);openDispute(view,row);},section);
   }
   section.insertAdjacentHTML('beforeend','<p>Margem mínima '+decimal.format(record.margem_minima)+'% · Amarelo até '+decimal.format(Number(record.margem_minima)+Number(record.alerta))+'% · Verde acima dessa faixa · Vermelho abaixo da mínima</p>');
   const items=disputeItems(row);
@@ -1188,6 +1188,165 @@ function openDispute(view,row) {
       list.append(li);
     }
     history.append(list);
+  }
+}
+
+const followTypes=['Ata','Documento do processo','Proposta assinada','Contrato','ARP'];
+const followStages=['Em acompanhamento','Processo finalizado'];
+const getFollow=row=>db.acompanhamentos.find(entry=>entry.edital_id===row.id);
+const followResults=(row,record,dispute)=>disputeItems(row).map(item=>({
+  item,result:{...dispute.resultados[item.id],...record?.ajustes[item.id]}
+}));
+
+async function ensureFollow(row) {
+  const current=getFollow(row);
+  if(current) return current;
+  const {error}=await client.from('acompanhamentos').insert({grupo_id:group,edital_id:row.id});
+  if(error && error.code!=='23505') throw error;
+  await load();
+  return getFollow(row);
+}
+
+function followEditor(view,row,record,item,result) {
+  const previousPrice=result.preco_final;
+  edit('Negociação · item '+item.codigo,[
+    ['situacao','Resultado atualizado','select',result.situacao??'Sem vencedor',['Ganhamos','Perdemos','Sem vencedor']],
+    ['vencedor','Novo vencedor, se for outra empresa','text',result.vencedor],
+    ['preco','Preço unitário negociado (R$)','number',previousPrice],
+    ['observacao','Observação da negociação','textarea',result.observacao]
+  ],async values=>{
+    const price=values.preco===''?null:Number(values.preco);
+    const winner=values.vencedor.trim();
+    if(values.situacao!=='Sem vencedor' && (price===null || !Number.isFinite(price) || price<=0)) throw new Error('Informe o preço negociado.');
+    if(values.situacao==='Perdemos' && !winner) throw new Error('Informe o nome do novo vencedor.');
+    const current=record??await ensureFollow(row);
+    const ajuste={situacao:values.situacao,vencedor:values.situacao==='Perdemos'?winner:'',preco_final:values.situacao==='Sem vencedor'?null:roundPrice(price),observacao:values.observacao.trim()};
+    await updateFollow(current,{ajustes:{...current.ajustes,[item.id]:ajuste}});
+  },{onSaved:()=>openFollow(view,row),decorate:form=>{
+    const fields=form.elements;
+    const price=fields.namedItem('preco');
+    price.required=false;
+    price.step='0.0001';
+    fields.namedItem('vencedor').required=false;
+    const margin=document.createElement('input');
+    margin.type='number';
+    margin.step='0.0001';
+    margin.max='99.9999';
+    const label=document.createElement('label');
+    label.append('Margem negociada sobre a venda (%)',margin);
+    const totalPreview=document.createElement('p');
+    totalPreview.setAttribute('role','status');
+    form.lastElementChild.before(label,totalPreview);
+    const refresh=()=>{
+      const actual=bidMargin(unitCost(item),Number(price.value));
+      totalPreview.textContent=actual==null?'Informe o preço ou a margem.':'Total do item '+money.format(roundPrice(Number(price.value)*item.quantidade))+' · Margem efetiva '+decimal.format(actual)+'%';
+    };
+    const sync=()=>{
+      const actual=bidMargin(unitCost(item),Number(price.value));
+      margin.value=actual==null?'':roundPrice(actual);
+      refresh();
+    };
+    margin.oninput=()=>{
+      if(margin.value!=='' && margin.checkValidity()) price.value=roundPrice(unitCost(item)/(1-Number(margin.value)/100));
+      refresh();
+    };
+    price.oninput=sync;
+    sync();
+  }});
+}
+
+async function updateFollow(record,values) {
+  const {data,error}=await client.from('acompanhamentos').update(values).match({grupo_id:group,id:record.id,versao:record.versao}).select('id').maybeSingle();
+  if(error) throw error;
+  if(!data) throw new Error('O processo mudou em outra sessão. Atualize a tela antes de continuar.');
+  await load();
+}
+
+function followAttach(view,row,record,kind='Ata') {
+  edit('Anexar documento do processo',[
+    ['tipo','Tipo de documento','select',kind,followTypes],
+    ['nome','Nome do documento','text',''],
+    ['arquivo','Arquivo PDF','file']
+  ],async values=>{
+    const nome=values.nome.trim();
+    if(!nome) throw new Error('Dê um nome ao documento.');
+    const pdf=await encodePdf(values.arquivo);
+    const current=record??await ensureFollow(row);
+    const {error}=await client.from('acompanhamento_arquivos').insert({
+      grupo_id:group,acompanhamento_id:current.id,tipo:values.tipo,nome,pdf,versao:current.versao
+    });
+    if(error) throw error;
+  },{onSaved:()=>openFollow(view,row)});
+}
+
+function openFollow(view,row) {
+  const record=getFollow(row);
+  const dispute=db.disputas.find(d=>d.edital_id===row.id && d.etapa===2);
+  if(!dispute) return;
+  view.replaceChildren();
+  const locked=!!record?.finalizado_em;
+  const section=panel(view,'<h2>'+escape(row.numero)+' · '+escape(row.orgao)+'</h2><p>'+followStages[Number(locked)]+(locked?' · '+quoteDate.format(new Date(record.finalizado_em)):'')+'</p>');
+  action('Voltar aos processos',render,section);
+  const items=followResults(row,record,dispute);
+  const company=db.empresas.find(e=>e.id===row.empresa_id)?.nome||'Nossa empresa';
+  const won=items.filter(({result})=>result.situacao==='Ganhamos');
+  const ready=won.length>0 && won.every(({result})=>Number(result.preco_final)>0);
+  const table=quoteTable(section,['Lote','Item','Descrição','Resultado','Vencedor','Preço unitário','Margem pelo nosso custo','Total','Ação']);
+  for(const {item,result} of items) {
+    const tr=table.insertRow();
+    const value=result.preco_final,margin=bidMargin(unitCost(item),Number(value));
+    for(const entry of [item.lote||'—',item.codigo,printedDescription(item),result.situacao||'—',result.situacao==='Ganhamos'?company:result.vencedor||'—',value==null?'—':money.format(value),margin==null?'—':decimal.format(margin)+'%',value==null?'—':money.format(roundPrice(value*item.quantidade))]) tr.insertCell().textContent=entry;
+    const controls=tr.insertCell();
+    if(!locked) writeAction('Editar negociação',()=>followEditor(view,row,record,item,result),controls);
+  }
+  if(ready) action('Baixar proposta readequada em PDF',()=>downloadProposalPdf(row,
+    won.map(({item,result})=>({...item,custo_embalagem:null,preco_unitario:result.preco_final})),{readequada:true}),section,true);
+  const docs=panel(view,'<h3>Documentos do processo</h3>');
+  if(!locked) {
+    writeAction('Anexar ata ou documento',()=>followAttach(view,row,record),docs);
+    if(ready) writeAction('Anexar proposta readequada assinada',()=>followAttach(view,row,record,'Proposta assinada'),docs);
+    writeAction('Anexar contrato',()=>followAttach(view,row,record,'Contrato'),docs);
+    writeAction('Anexar ARP',()=>followAttach(view,row,record,'ARP'),docs);
+    if(ready) docs.insertAdjacentHTML('beforeend','<p>Assine o PDF digitalmente ou à mão, anexe a via assinada e envie pelo canal indicado pelo órgão.</p>');
+  }
+  if(record) loadFollowFiles(docs,record).catch(error=>message(error.message));
+  if(!locked) writeAction('Enviar para Processos Finalizados',()=>edit('Finalizar processo',[],async()=>{
+    const current=record??await ensureFollow(row);
+    await updateFollow(current,{finalizado_em:new Date().toISOString()});
+  },{onSaved:()=>{page='finalizados';render();},decorate:form=>{
+    const notice=document.createElement('p');
+    notice.textContent='O processo e seus documentos serão arquivados para consulta.';
+    form.prepend(notice);
+  }}),docs);
+}
+
+async function loadFollowFiles(section,record) {
+  const {data,error}=await client.from('acompanhamento_arquivos').select('id,nome,tipo,versao,criado_em').match({grupo_id:group,acompanhamento_id:record.id}).order('criado_em',{ascending:false});
+  if(error) throw error;
+  if(!section.isConnected || !data.length) return;
+  const table=quoteTable(section,['Nome','Tipo','Data do anexo','Ação']);
+  for(const doc of data) {
+    const tr=table.insertRow();
+    for(const value of [doc.nome,doc.tipo+(doc.tipo==='Proposta assinada' && doc.versao!==record.versao?' · versão anterior':''),quoteDate.format(new Date(doc.criado_em))]) tr.insertCell().textContent=value;
+    action('Baixar PDF',async()=>{
+      const {data,error}=await client.from('acompanhamento_arquivos').select('pdf').match({grupo_id:group,id:doc.id}).single();
+      if(error) throw error;
+      saveQuoteFile(new Blob([pdfBytes(data.pdf)],{type:'application/pdf'}),doc.nome.replace(/\.pdf$/i,'')+'.pdf');
+    },tr.insertCell());
+  }
+}
+
+function renderFollow(view) {
+  if(!client || unavailableRegistries.has('acompanhamentos')) {
+    panel(view,'<p>O acompanhamento depende do banco de dados conectado.</p>');
+    return;
+  }
+  const archived=page==='finalizados';
+  const rows=db.editais.filter(row=>db.disputas.some(d=>d.edital_id===row.id && d.etapa===2) && !!getFollow(row)?.finalizado_em===archived);
+  if(!rows.length) panel(view,archived?'<p>Nenhum processo finalizado.</p>':'<p>Nenhum processo recebido da disputa.</p>');
+  for(const row of rows) {
+    const card=panel(view,'<h3>'+escape(row.numero)+'</h3><p>'+escape(row.orgao)+'</p>');
+    action(archived?'Consultar processo':'Abrir acompanhamento',()=>openFollow(view,row),card);
   }
 }
 
@@ -1489,7 +1648,8 @@ function render() {
   if (page === 'clientes' && master) { renderClients(view); return; }
   if (page === 'equipe' && groupRole() === 'admin') { renderTeam(view); return; }
   if (activeEdital) { renderProposal(view,db.editais.find(x => x.id === activeEdital)); return; }
-  if (page === 'disputa' || page === 'acompanhamento') { renderDisputes(view); return; }
+  if (page === 'acompanhamento' || page === 'finalizados') { renderFollow(view); return; }
+  if (page === 'disputa') { renderDisputes(view); return; }
   if (page === 'cotacoes' || page === 'orcamento') { renderQuotes(view); return; }
   if (page === 'financeiro') { renderQuoteFinance(view); return; }
   if (page === 'propostas') { renderProposalBoard(view); return; }
@@ -1712,7 +1872,7 @@ async function proposalPdfLibrary() {
   return pdfLibrary;
 }
 
-async function downloadProposalPdf(row,items,{budget=false}={}) {
+async function downloadProposalPdf(row,items,{budget=false,readequada=false}={}) {
   const Pdf = await proposalPdfLibrary();
   const pdf = new Pdf({unit:'mm',format:'a4'});
   const company = db.empresas.find(entry=>entry.id===row.empresa_id);
@@ -1737,7 +1897,7 @@ async function downloadProposalPdf(row,items,{budget=false}={}) {
     pdf.addImage(identity.logo,image.fileType,16,y,image.width*scale,image.height*scale);
     y+=image.height*scale+5;
   }
-  write(budget?'ORÇAMENTO COMERCIAL':'PROPOSTA COMERCIAL',{size:17,bold:true});
+  write(budget?'ORÇAMENTO COMERCIAL':readequada?'PROPOSTA COMERCIAL READEQUADA':'PROPOSTA COMERCIAL',{size:17,bold:true});
   write('Razão social: '+(company?.nome??''),{bold:true});
   write('CNPJ: '+(company?.cnpj??''));
   for (const [key,label] of proposalIdentity) if (identity[key]) write(label+': '+identity[key]);
@@ -1776,7 +1936,7 @@ async function downloadProposalPdf(row,items,{budget=false}={}) {
     pdf.setTextColor(115);
     pdf.text('Gerado pelo E-Lementar Licitações',194,289,{align:'right'});
   }
-  pdf.save((budget?'orcamento-':'proposta-')+row.numero.replace(/[^a-z0-9_-]/gi,'-')+'.pdf');
+  pdf.save((budget?'orcamento-':readequada?'proposta-readequada-':'proposta-')+row.numero.replace(/[^a-z0-9_-]/gi,'-')+'.pdf');
 }
 
 const pdfBytes = base64=>Uint8Array.from(atob(base64),character=>character.charCodeAt(0));
