@@ -1522,7 +1522,6 @@ function renderOverview(view) {
     const grid=document.createElement('section');
     grid.className='grid overview-metrics';
     for(const [label,value,detail,symbol] of [
-      ['Ano em vigor',select.selectedOptions[0].textContent,'Ano da sessão ou da referência do edital','relatorios'],
       ['Disputas cadastradas',disputes.length+waiting,'Inclui propostas prontas que aguardam disputa','disputa'],
       ['Valor em propostas',money.format(total(items)),'Soma das propostas cadastradas','propostas'],
       ['Valor ganho',money.format(amount/precision),'Preço atualizado × quantidade dos itens ganhos','financeiro'],
