@@ -11,7 +11,7 @@ const byId = id => document.getElementById(id);
 const escape = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const message = text => { byId('notice').textContent = text; };
 const tables = ['empresas','editais','itens','documentos'];
-const registryTables = ['orgaos_compradores','catalogo'];
+const registryTables = ['orgaos_compradores','catalogo','cotacoes'];
 const allTables = [...tables,...registryTables];
 const db = Object.fromEntries(allTables.map(table => [table,[]]));
 const unavailableRegistries = new Set();
@@ -25,7 +25,6 @@ const screens = {
   configuracoes:'Configurações',aplicativo:'Aplicativo',ajuda:'Central de Ajuda'
 };
 const pendingScreens = {
-  cotacoes:'Solicitações de cotação e revisão de preços para fornecedores, com exportação em PDF e XML.',
   orcamento:'Orçamentos para órgãos compradores antes da publicação do edital.',
   disputa:'Acompanhamento de lances e simulação de preços pela margem.',
   acompanhamento:'Negociação após a disputa, emissão de proposta readequada e acompanhamento até a assinatura.',
@@ -602,6 +601,227 @@ function proposalControls(parent,row) {
   if (stage<5) action(proposalStages[stage+1],()=>moveProposal(row,stage+1),parent,true);
 }
 
+const quoteStages = ['Em cotação','Revisão','Enviado'];
+const quoteDate = new Intl.DateTimeFormat('pt-BR',{dateStyle:'short',timeStyle:'short',timeZone:'America/Sao_Paulo'});
+
+async function updateQuote(row,values) {
+  if (!client) return save('cotacoes',values,row.id);
+  const {data,error} = await client.from('cotacoes').update(values).match({grupo_id:group,id:row.id,revisao:row.revisao}).select('id').maybeSingle();
+  if (error) throw error;
+  if (!data) throw new Error('A cotação mudou. Atualize a tela antes de salvar.');
+  await load();
+  return data.id;
+}
+
+function quoteForm(view,row={}) {
+  edit(row.id?'Editar cotação':'Nova cotação',[
+    ['titulo','Título da cotação','text',row.titulo],
+    ['empresa_id','Empresa solicitante','select',row.empresa_id ?? db.empresas[0]?.id,db.empresas.map(company=>[company.id,company.nome+' · '+company.cnpj])],
+    ['fornecedor','Fornecedor','text',row.fornecedor],
+    ['email','E-mail do fornecedor','email',row.email],
+    ['observacao','Instruções para o fornecedor','textarea',row.observacao]
+  ], async values=>{
+    values.titulo=values.titulo.trim();
+    values.fornecedor=values.fornecedor.trim();
+    if (!values.empresa_id) throw new Error('Cadastre uma empresa solicitante nas Configurações.');
+    if (!values.titulo || !values.fornecedor) throw new Error('Informe o título e o fornecedor.');
+    return row.id ? updateQuote(row,values) : save('cotacoes',client?values:{...values,etapa:0,itens:[],historico:[]});
+  },{onSaved:id=>openQuote(view,id)});
+}
+
+function quoteItem(view,row,item) {
+  const fields = item ? [
+    ['quantidade','Quantidade solicitada','number',item.quantidade],
+    ['preco','Preço unitário retornado pelo fornecedor','number',item.preco]
+  ] : [
+    ['catalogo_id','Produto ou serviço','select','',[]],
+    ['quantidade','Quantidade solicitada','number',1]
+  ];
+  edit(item?'Editar item da cotação':'Adicionar item do catálogo',fields,async values=>{
+    if (!item && row.itens.some(entry=>entry.catalogo_id===values.catalogo_id)) throw new Error('Este item já está na cotação.');
+    const source = db.catalogo.find(entry=>entry.id===values.catalogo_id);
+    if (!item && !source) throw new Error('Selecione um item do catálogo.');
+    const quantidade = Number(values.quantidade);
+    const preco = values.preco ? Number(values.preco) : null;
+    if (!Number.isFinite(quantidade) || quantidade<=0 || (preco!==null && (!Number.isFinite(preco) || preco<0 || preco>=1e10))) throw new Error('Confira a quantidade e o preço informado.');
+    const picked = item ?? {catalogo_id:source.id,codigo:source.codigo,descricao:source.descricao,unidade:source.unidade,marca:source.marca,custo_base:Number(source.custo)};
+    const entry = {...picked,quantidade,preco};
+    const itens = item ? row.itens.map(existing=>existing.catalogo_id===item.catalogo_id?entry:existing) : [...row.itens,entry];
+    return updateQuote(row,{itens});
+  },{onSaved:id=>openQuote(view,id),decorate:form=>{
+    if (item) {
+      form.elements.namedItem('preco').required=false;
+      if (row.etapa===2) form.elements.namedItem('quantidade').readOnly=true;
+      return;
+    }
+    registryPicker(form,{name:'catalogo_id',table:'catalogo',label:'Buscar no catálogo',placeholder:'Selecione um produto ou serviço',
+      title:'Cadastrar produto ou serviço',fields:descricao=>catalogFields({descricao}),saveRecord:values=>saveCatalog(values),
+      entryLabel:entry=>entry.codigo+' · '+entry.descricao,searchText:entry=>[entry.codigo,entry.descricao,entry.marca].join(' ')});
+  }});
+}
+
+async function moveQuote(row,destination) {
+  if (Math.abs(destination-row.etapa)!==1) throw new Error('Mova a cotação uma coluna por vez.');
+  if (destination>row.etapa && !row.itens.length) throw new Error('Inclua pelo menos um item do catálogo.');
+  const values={etapa:destination};
+  if (!client) values.historico=[...row.historico,{origem:row.etapa,destino:destination,usuario:'Demonstração',data:new Date().toISOString()}];
+  await updateQuote(row,values);
+}
+
+function renderQuotes(view) {
+  if (unavailableRegistries.has('cotacoes')) {
+    panel(view,'<p>As cotações aguardam a atualização do banco de dados.</p>');
+    return;
+  }
+  writeAction('Nova cotação',()=>quoteForm(view),byId('page-actions'),true);
+  const grid=document.createElement('section');
+  grid.style.cssText='display:grid;grid-template-columns:repeat(3,minmax(210px,1fr));gap:12px;overflow:auto';
+  for (const [index,stage] of quoteStages.entries()) {
+    const rows=db.cotacoes.filter(row=>row.etapa===index);
+    const lane=document.createElement('section');
+    lane.className='lane';
+    lane.innerHTML='<h3>'+stage+' · '+rows.length+'</h3>';
+    if (canWrite()) {
+      lane.ondragover=event=>event.preventDefault();
+      lane.ondrop=event=>{
+        event.preventDefault();
+        const row=db.cotacoes.find(record=>record.id===event.dataTransfer.getData('text/plain'));
+        if (row && row.etapa!==index) moveQuote(row,index).then(render).catch(error=>message(error.message));
+      };
+    }
+    for (const row of rows) {
+      const card=panel(lane,'<strong>'+escape(row.titulo)+'</strong><p>'+escape(row.fornecedor)+'</p><p>'+row.itens.length+' item(ns)</p>');
+      card.classList.add('card');
+      card.draggable=canWrite();
+      card.ondragstart=event=>event.dataTransfer.setData('text/plain',row.id);
+      action('Abrir cotação',()=>openQuote(view,row.id),card);
+    }
+    grid.append(lane);
+  }
+  view.append(grid);
+}
+
+function openQuote(view,id) {
+  const row=db.cotacoes.find(entry=>entry.id===id);
+  if (page!=='cotacoes' || !row) return;
+  view.replaceChildren();
+  byId('page-actions').replaceChildren();
+  action('Voltar ao quadro',render,byId('page-actions'));
+  const section=panel(view,'<h2>'+escape(row.titulo)+'</h2><p>'+escape(row.fornecedor)+' · '+quoteStages[row.etapa]+'</p>');
+  if (row.observacao) section.insertAdjacentHTML('beforeend','<p>'+escape(row.observacao)+'</p>');
+  if (row.etapa<2) {
+    writeAction('Editar cotação',()=>quoteForm(view,row),section);
+    writeAction('Adicionar item do catálogo',()=>quoteItem(view,row),section,true);
+  }
+  if (row.etapa>0) writeAction('Voltar para '+quoteStages[row.etapa-1],async()=>{await moveQuote(row,row.etapa-1);openQuote(view,id);},section);
+  if (row.etapa<2) writeAction(row.etapa===1?'Marcar como enviado':'Mover para revisão',async()=>{await moveQuote(row,row.etapa+1);openQuote(view,id);},section);
+  if (row.itens.length) {
+    action('Baixar PDF para o fornecedor',()=>downloadQuote(row,'pdf'),section);
+    action('Baixar XML para o fornecedor',()=>downloadQuote(row,'xml'),section);
+  }
+  const table=quoteTable(section,['Código','Produto ou serviço','Quantidade','Unidade','Preço retornado','Ações']);
+  for (const item of row.itens) {
+    const line=table.insertRow();
+    for (const value of [item.codigo,item.descricao,item.quantidade,item.unidade,item.preco == null?'Aguardando preço':money.format(item.preco)]) line.insertCell().textContent=value;
+    const controls=line.insertCell();
+    if (!item.aplicado_em) writeAction(row.etapa===2?'Registrar preço':'Editar item',()=>quoteItem(view,row,item),controls);
+    if (row.etapa<2 && !item.aplicado_em) writeAction('Remover',async()=>{
+      await updateQuote(row,{itens:row.itens.filter(other=>other.catalogo_id!==item.catalogo_id)});
+      openQuote(view,id);
+    },controls);
+  }
+  if (row.historico.length) {
+    const history=panel(view,'<h3>Histórico de movimentações</h3>');
+    const list=document.createElement('ul');
+    list.style.cssText='list-style:none;margin:4px 0;padding:0;font-size:9pt;line-height:1.45';
+    for(const entry of [...row.historico].reverse()) {
+      const line=document.createElement('li');
+      line.textContent=[entry.origem==null?quoteStages[entry.destino]:quoteStages[entry.origem]+' → '+quoteStages[entry.destino],entry.usuario,quoteDate.format(new Date(entry.data))].filter(Boolean).join(' · ');
+      list.append(line);
+    }
+    history.append(list);
+  }
+}
+
+function quoteTable(parent,headers) {
+  const wrap=document.createElement('div');
+  wrap.className='scroll';
+  wrap.innerHTML='<table><thead><tr>'+headers.map(label=>'<th scope="col">'+label+'</th>').join('')+'</tr></thead><tbody></tbody></table>';
+  parent.append(wrap);
+  return wrap.querySelector('tbody');
+}
+
+function saveQuoteFile(blob,name) {
+  const url=URL.createObjectURL(blob);
+  const link=document.createElement('a');
+  link.href=url;
+  link.download=name;
+  link.click();
+  setTimeout(()=>URL.revokeObjectURL(url),30000);
+}
+
+async function downloadQuote(row,format) {
+  const company=db.empresas.find(entry=>entry.id===row.empresa_id);
+  const name='cotacao-'+row.id.slice(0,8);
+  if (format==='xml') {
+    const tag=(key,value)=>'<'+key+'>'+escape(value)+'</'+key+'>';
+    const itemTags=row.itens.map(item=>'<item>'+['codigo','descricao','marca','unidade','quantidade'].map(key=>tag(key,item[key])).join('')+tag('preco_unitario','')+'</item>').join('');
+    const xml='<?xml version="1.0" encoding="UTF-8"?><cotacao>'+tag('referencia',name)+tag('titulo',row.titulo)+tag('empresa',company?.nome)+tag('cnpj',company?.cnpj)+tag('fornecedor',row.fornecedor)+tag('instrucoes',row.observacao)+'<itens>'+itemTags+'</itens></cotacao>';
+    saveQuoteFile(new Blob([xml],{type:'application/xml;charset=utf-8'}),name+'.xml');
+    return;
+  }
+  const Pdf=await proposalPdfLibrary();
+  const pdf=new Pdf({unit:'mm',format:'a4'});
+  let y=18;
+  function write(value,size=10,bold=false) {
+    pdf.setFont('helvetica',bold?'bold':'normal');
+    pdf.setFontSize(size);
+    for (const text of pdf.splitTextToSize(String(value??''),178)) {
+      if (y>277) { pdf.addPage();y=18; }
+      pdf.text(text,16,y);
+      y+=size*.46;
+    }
+  }
+  write('SOLICITAÇÃO DE COTAÇÃO DE PREÇOS',15,true);
+  write(row.titulo,12,true);
+  write('Referência: '+name);
+  write('Solicitante: '+(company?.nome??'')+' · CNPJ '+(company?.cnpj??''));
+  write('Fornecedor: '+row.fornecedor);
+  if (row.observacao) write(row.observacao);
+  for (const item of row.itens) {
+    if (y>258) { pdf.addPage();y=18; }
+    y+=4;
+    write(item.codigo+' · '+item.descricao,10,true);
+    write('Quantidade: '+item.quantidade+' '+item.unidade+(item.marca?' · Marca: '+item.marca:''));
+    write('Preço unitário: R$ ____________________');
+  }
+  pdf.save(name+'.pdf');
+}
+
+function renderQuoteFinance(view) {
+  const section=panel(view,'<h2>Preços recebidos de fornecedores</h2><p>Compare o preço recebido com o custo do catálogo antes de aplicar.</p>');
+  const received=db.cotacoes.filter(row=>row.etapa===2).flatMap(row=>row.itens.filter(item=>item.preco!=null).map(item=>({row,item})));
+  if (!received.length) { section.append('Nenhum preço recebido registrado em cotações enviadas.'); return; }
+  const table=quoteTable(section,['Cotação e fornecedor','Produto ou serviço','Custo atual','Preço recebido','Diferença','Ação']);
+  for (const {row,item} of received) {
+    const source=db.catalogo.find(entry=>entry.id===item.catalogo_id);
+    const line=table.insertRow();
+    for (const value of [row.titulo+' · '+row.fornecedor,item.codigo+' · '+item.descricao,source?money.format(source.custo):'Indisponível',money.format(item.preco),source?money.format(item.preco-source.custo):'—']) line.insertCell().textContent=value;
+    const controls=line.insertCell();
+    if (item.aplicado_em) { controls.textContent='Aplicado em '+quoteDate.format(new Date(item.aplicado_em)); continue; }
+    if (!source || !client) continue;
+    writeAction('Aplicar ao catálogo',()=>edit('Aplicar custo de '+item.codigo,[],async()=>{
+      const {error}=await client.rpc('aplicar_custo_cotado',{p_cotacao:row.id,p_item:item.catalogo_id,p_custo_esperado:source.custo,p_revisao:row.revisao});
+      if (error) throw error;
+      await load();
+    },{decorate:form=>{
+      const summary=document.createElement('p');
+      summary.textContent=item.descricao+' · '+money.format(source.custo)+' → '+money.format(item.preco);
+      form.prepend(summary);
+    }}),controls);
+  }
+}
+
 function renderProposalBoard(view) {
   const grid = document.createElement('section');
   grid.style.cssText = 'display:grid;grid-template-columns:repeat(6,minmax(210px,1fr));gap:12px;overflow:auto';
@@ -864,6 +1084,8 @@ function render() {
   if (page === 'clientes' && master) { renderClients(view); return; }
   if (page === 'equipe' && groupRole() === 'admin') { renderTeam(view); return; }
   if (activeEdital) { renderProposal(view,db.editais.find(x => x.id === activeEdital)); return; }
+  if (page === 'cotacoes') { renderQuotes(view); return; }
+  if (page === 'financeiro') { renderQuoteFinance(view); return; }
   if (page === 'propostas') { renderProposalBoard(view); return; }
   if (page === 'propostaPronta') { renderReadyProposals(view); return; }
   if (page === 'documentacao') { renderAcervo(view).catch(error=>message(error.message)); return; }
