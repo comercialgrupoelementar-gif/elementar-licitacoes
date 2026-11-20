@@ -719,12 +719,14 @@ function openQuote(view,id) {
     action('Baixar PDF para o fornecedor',()=>downloadQuote(row,'pdf'),section);
     action('Baixar XML para o fornecedor',()=>downloadQuote(row,'xml'),section);
   }
+  if (row.etapa===2 && row.itens.some(item=>item.preco!=null)) action('Ver preços no Financeiro',()=>{page='financeiro';render();},section);
   const table=quoteTable(section,['Código','Produto ou serviço','Quantidade','Unidade','Preço retornado','Ações']);
   for (const item of row.itens) {
     const line=table.insertRow();
     for (const value of [item.codigo,item.descricao,item.quantidade,item.unidade,item.preco == null?'Aguardando preço':money.format(item.preco)]) line.insertCell().textContent=value;
     const controls=line.insertCell();
-    if (!item.aplicado_em) writeAction(row.etapa===2?'Registrar preço':'Editar item',()=>quoteItem(view,row,item),controls);
+    if (item.aplicado_em) controls.textContent='Custo aplicado em '+quoteDate.format(new Date(item.aplicado_em));
+    else writeAction(row.etapa===2?'Registrar preço':'Editar item',()=>quoteItem(view,row,item),controls);
     if (row.etapa<2 && !item.aplicado_em) writeAction('Remover',async()=>{
       await updateQuote(row,{itens:row.itens.filter(other=>other.catalogo_id!==item.catalogo_id)});
       openQuote(view,id);
