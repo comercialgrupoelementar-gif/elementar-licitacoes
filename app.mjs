@@ -111,6 +111,7 @@ function edit(title, fields, save, options = {}) {
 let screenAppearance=[];
 async function load() {
   screenAppearance=[];
+  screenAccess={};
   if (!client) {
     const data = JSON.parse(localStorage.getItem(localKey) || '{}');
     allTables.forEach(table => { db[table] = data[table] ?? []; });
@@ -121,6 +122,9 @@ async function load() {
     unavailableRegistries.clear();
     return;
   }
+  const {data:access,error:accessError}=await client.rpc('licitacoes_minhas_telas',{empresa:group});
+  if(accessError) throw accessError;
+  screenAccess=access??{};
   const responses = await Promise.all(allTables.map(table => client.from(table).select(table === 'editais'
     ? 'id,grupo_id,empresa_id,numero,numero_pregao,orgao,modalidade,sessao,status,parecer,edital_url,local_disputa,edital_pdf_nome,objeto,modo_disputa,etapa_proposta'
     : table==='cotacoes' ? 'id,grupo_id,empresa_id,titulo,fornecedor,email,observacao,etapa,itens,historico,revisao,criado_em,tipo,orgao_id,assinado_em' : '*').eq('grupo_id',group)));
@@ -170,7 +174,7 @@ function demoDelete(table,id,parent,onSaved=render) {
   },{onSaved}),parent);
 }
 
-const canWrite = () => !client || ['admin','operador'].includes(groupRole());
+const canWrite = () => !client || (['admin','operador'].includes(groupRole()) && (!Object.hasOwn(screens,page) || screenAccess[page]==='operacao'));
 const writeAction = (label,run,parent,primary) => { if (canWrite()) action(label,run,parent,primary); };
 
 function companyFields(row = {}) {
@@ -577,6 +581,54 @@ async function openClients(key='clientes') {
     openTicketCount=count ?? 0;
   }
   page = key; activeEdital = null; render();
+}
+
+const accessLevels=[['bloqueado','Sem acesso'],['consulta','Somente consulta'],['operacao','Operar']];
+let screenAccess={};
+const screenAllowed=key=>!client || !Object.hasOwn(screens,key) || screenAccess[key]!=='bloqueado';
+
+function mountCargoManagement(parent,empresa,mestre=false) {
+  const section=panel(parent,'<h2>Cargos e regras da equipe</h2>');
+  action('Gerenciar cargos e permissões',()=>refresh(),section,true);
+  const content=document.createElement('div');
+  section.append(content);
+  async function refresh() {
+    const state=await call('licitacoes_painel_cargos',{empresa});
+    if(!content.isConnected) return;
+    content.replaceChildren();
+    const levels=(rules,defaultLevel)=>Object.entries(screens).map(([key,label])=>[key,label,'select',rules[key]??defaultLevel,accessLevels]);
+    const saveRules=(heading,fields,save)=>edit(heading,fields,save,{onSaved:()=>refresh().catch(error=>message(error.message))});
+    const presets={
+      'Auxiliar de licitação':{painel:'consulta',editais:'operacao',documentacao:'operacao',catalogo:'consulta',propostas:'consulta',ajuda:'consulta'},
+      'Analista de licitação':{painel:'consulta',editais:'operacao',documentacao:'operacao',catalogo:'consulta',propostas:'operacao',propostaPronta:'consulta',disputa:'operacao',acompanhamento:'operacao',ajuda:'consulta'},
+      'Gerente de licitação':Object.fromEntries(Object.keys(screens).map(key=>[key,key==='configuracoes'?'consulta':'operacao']))
+    };
+    function editCargo(cargo={}) {
+      saveRules('Permissões do cargo',[
+        ['nome_cargo','Nome do cargo','text',cargo.nome],...levels(cargo.regras??{},'bloqueado')
+      ],({nome_cargo,...regras_cargo})=>call('licitacoes_gravar_cargo',{empresa,nome_cargo,regras_cargo,cargo:cargo.id??null}));
+    }
+    if(mestre) action('Definir limites da empresa',()=>saveRules('Limites máximos por tela',
+      levels(state.limites,'operacao'),regras_telas=>call('licitacoes_gravar_limites',{empresa,regras_telas})),content,true);
+    action('Criar cargo',()=>editCargo(),content,true);
+    const template=panel(content,'<h3>Modelos de cargo</h3>');
+    for(const [nome,regras] of Object.entries(presets)) action(nome,()=>editCargo({nome,regras}),template);
+    const cargos=panel(content,'<h3>Cargos cadastrados</h3>');
+    if(!state.cargos.length) cargos.append('Nenhum cargo personalizado cadastrado.');
+    for(const cargo of state.cargos) {
+      const card=panel(cargos,'<strong>'+escape(cargo.nome)+'</strong> ');
+      action('Editar permissões',()=>editCargo(cargo),card);
+    }
+    const members=panel(content,'<h3>Atribuir cargos aos usuários</h3>');
+    for(const member of state.integrantes) {
+      const current=state.cargos.find(cargo=>cargo.id===member.cargo_id);
+      const card=panel(members,'<strong>'+escape(member.email)+'</strong><p>'+escape(current?.nome??member.papel)+'</p>');
+      if(member.papel==='admin') continue;
+      action('Alterar cargo',()=>saveRules('Cargo de '+member.email,[
+        ['cargo','Cargo na empresa','select',member.cargo_id??'base',[['base','Usar perfil básico do usuário'],...state.cargos.map(cargo=>[cargo.id,cargo.nome])]]
+      ],({cargo})=>call('licitacoes_atribuir_cargo',{empresa,integrante:member.id,cargo:cargo==='base'?null:cargo})),card);
+    }
+  }
 }
 
 async function openTeam() {
@@ -1106,6 +1158,7 @@ function renderClients(view) {
       action('Consultar integrantes',()=>showMemberProfiles(members,customer.id),card);
       const permissions=panel(card,'<h3>Acesso e aliases</h3>');
       action('Configurar acesso dos usuários',()=>openAccessConfiguration(permissions,customer,true),card);
+      mountCargoManagement(card,customer.id,true);
     }
   }
 }
@@ -1149,6 +1202,7 @@ function renderMemberProfiles(section,customerId,members,refresh) {
 }
 
 function renderTeam(view) {
+  mountCargoManagement(view,group);
   const section = panel(view,'<h2>Equipe da empresa</h2><p>Gerencie o acesso ao seu espaço de trabalho.</p>');
   action('Adicionar integrante', () => edit('Adicionar integrante',[
     ['email_membro','E-mail do usuário cadastrado','email'],
@@ -2046,7 +2100,7 @@ function icon(name) {
   return `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${iconPaths[name]}"/></svg>`;
 }
 function goTo(key) {
-  if (isDemo() && key==='configuracoes') return;
+  if (!screenAllowed(key) || (key==='configuracoes' && client && (isDemo() || groupRole()!=='admin'))) return;
   page = key;
   activeEdital = null;
   message('');
@@ -2334,12 +2388,18 @@ function render() {
     nav.append(select);
   }
   for (const [key,label] of Object.entries(screens)) {
-    if (isDemo() && key==='configuracoes') continue;
+    if (!screenAllowed(key) || (key==='configuracoes' && client && (isDemo() || groupRole()!=='admin'))) continue;
     navAction(key,label,()=>goTo(key),nav);
   }
   if (groupRole() === 'admin') navAction('equipe','Minha equipe',openTeam,nav);
   if (platformView) return;
   if (page === 'equipe' && groupRole() === 'admin') { renderTeam(view); return; }
+  if (!screenAllowed(page)) {
+    const fallback=Object.keys(screens).find(key=>screenAllowed(key) && (key!=='configuracoes' || groupRole()==='admin'));
+    if(fallback) {goTo(fallback);return;}
+    panel(view,'<p>Seu perfil está sem módulos habilitados. Consulte o administrador da empresa.</p>');
+    return;
+  }
   if (activeEdital) { renderProposal(view,db.editais.find(x => x.id === activeEdital)); return; }
   if (page === 'acompanhamento' || page === 'finalizados') { renderFollow(view); return; }
   if (page === 'disputa') { renderDisputes(view); return; }
@@ -2358,6 +2418,12 @@ function render() {
   if (page === 'painel') {
     renderOverview(view);
   } else if (page === 'configuracoes') {
+    if(client && groupRole()!=='admin') return;
+    if(client && canWrite()) {
+      const settings=panel(view,'<h2>Configurações por tela</h2><p>Ajuste a apresentação de cada módulo para sua equipe.</p>');
+      renderVisualPreview(settings,group);
+      action('Abrir Minha equipe',openTeam,settings);
+    }
     const section = panel(view,'<h2>CNPJs participantes</h2><p>Cadastre os CNPJs que sua empresa usa para participar de licitações. Eles ficam disponíveis para seleção no edital.</p>');
     writeAction('Cadastrar CNPJ',company,section,true);
     if (!db.empresas.length) section.insertAdjacentHTML('beforeend','<p class="muted">Nenhum CNPJ cadastrado.</p>');
