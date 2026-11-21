@@ -2137,7 +2137,14 @@ function applyScreenAppearance(view) {
   }
 }
 
+let previousScreen;
 function render() {
+  const currentScreen = [group,page,activeEdital,detailMode,Boolean(session)].join(':');
+  if (previousScreen !== currentScreen) {
+    document.querySelector('.workspace').scrollTop = 0;
+    document.scrollingElement.scrollTop = 0;
+    previousScreen = currentScreen;
+  }
   const nav = byId('nav');
   const view = byId('view');
   const account = byId('account');
