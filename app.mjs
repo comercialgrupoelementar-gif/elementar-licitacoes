@@ -569,8 +569,13 @@ async function call(name, args) {
 }
 
 async function openClients(key='clientes') {
-  if (['clientes','masterAssinaturas','masterFinanceiro','masterSuporte'].includes(key)) await loadCommercialRecords();
+  if (['clientes','masterAssinaturas','masterFinanceiro'].includes(key)) await loadCommercialRecords();
   if (['clientes','masterEmpresas','masterAcessos','masterAparencia','masterAssinaturas','masterFinanceiro','masterSuporte'].includes(key)) clients = await call('licitacoes_clientes');
+  if(key==='clientes') {
+    const {count,error}=await client.from('chamados_clientes').select('id',{count:'exact',head:true}).neq('situacao','Resolvido');
+    if(error) throw error;
+    openTicketCount=count ?? 0;
+  }
   page = key; activeEdital = null; render();
 }
 
@@ -645,6 +650,7 @@ const commercialSections = {
   suporte: ['Suporte interno', 'Registrar chamado', ['Aberto','Em atendimento','Resolvido']]
 };
 
+let openTicketCount = 0;
 async function loadCommercialRecords() {
   const {data,error} = await client.from('gestao_comercial').select('*').order('prazo');
   if (error) throw new Error(error.message);
@@ -687,7 +693,7 @@ function renderCommercialDashboard(view,selectedType) {
     ['Assinaturas ativas',commercialRecords.filter(entry => entry.tipo === 'assinatura' && entry.situacao === 'Ativa').length],
     ['Cobranças vencidas',pending.filter(entry => entry.prazo < today).length],
     ['A receber',money.format(pending.reduce((sum,entry) => sum + Number(entry.valor),0))],
-    ['Chamados pendentes',commercialRecords.filter(entry => entry.tipo === 'suporte' && entry.situacao !== 'Resolvido').length]
+    ['Chamados pendentes',openTicketCount]
   ]) panel(indicators,'<strong>'+title+'</strong><p>'+value+'</p>');
   return;
   }
@@ -714,7 +720,7 @@ const masterPages = {
   masterAssinaturas:'Assinaturas',
   masterFinanceiro:'Financeiro comercial',
   masterComercial:'Solicitações comerciais',
-  masterSuporte:'Suporte interno',
+  masterSuporte:'Chamados de clientes',
   masterAparencia:'Aparência por tela',
   masterAuditoria:'Auditoria administrativa',
   masterVersoes:'Versão do sistema'
@@ -736,8 +742,59 @@ function renderMasterRecords(view, table, columns, limit, prepare) {
     }).catch(error=>{if(section.isConnected) section.textContent=error.message;});
 }
 
+function renderCustomerTickets(view, attending=false) {
+  const section=panel(view,attending?'<h2>Fila de chamados das empresas</h2>':'<h2>Chamados da empresa</h2>');
+  if (!attending) action('Abrir chamado',()=>edit('Abrir chamado',[
+    ['assunto','Assunto','text'],['descricao','Descrição','textarea']
+  ],async values=>{
+    const {error}=await client.from('chamados_clientes').insert({...values,grupo_id:group});
+    if(error) throw error;
+  },{decorate:form=>{
+    form.elements.assunto.maxLength=180;
+    form.elements.assunto.minLength=3;
+    form.elements.descricao.maxLength=5000;
+    form.elements.descricao.minLength=5;
+  }}),section,true);
+  const list=document.createElement('div');
+  list.textContent='Carregando chamados…';
+  section.append(list);
+  let query=client.from('chamados_clientes').select('id,grupo_id,assunto,descricao,situacao,resposta,criado_em,atualizado_em').order('criado_em',{ascending:false});
+  if (!attending) query=query.eq('grupo_id',group);
+  Promise.resolve(query).then(({data,error})=>{
+    if(!list.isConnected) return;
+    if(error) throw error;
+    list.replaceChildren();
+    if(!data.length) list.textContent='Nenhum chamado registrado.';
+    if(attending) data.sort((a,b)=>Number(a.situacao==='Resolvido')-Number(b.situacao==='Resolvido'));
+    for(const ticket of data) {
+      const company=attending ? clients.find(row=>row.id===ticket.grupo_id)?.nome : '';
+      const card=panel(list,'<strong>'+escape(ticket.assunto)+'</strong><p>'+
+        (company?escape(company)+' · ':'')+escape(ticket.situacao)+' · '+escape(new Date(ticket.criado_em).toLocaleString('pt-BR'))+'</p>');
+      for(const [label,value] of [['Descrição',ticket.descricao],['Resposta do suporte',ticket.resposta]]) {
+        if (!value) continue;
+        const detail=document.createElement('p');
+        detail.style.whiteSpace='pre-wrap';
+        detail.textContent=label+': '+value;
+        card.append(detail);
+      }
+      if(attending) action('Atender chamado',()=>edit('Atender chamado',[
+        ['situacao','Situação','select',ticket.situacao,['Aberto','Em atendimento','Resolvido']],
+        ['resposta','Resposta para a empresa','textarea',ticket.resposta]
+      ],async values=>{
+        if(values.situacao==='Resolvido' && !values.resposta.trim()) throw new Error('Escreva a solução antes de resolver o chamado.');
+        const {error}=await client.from('chamados_clientes').update(values).eq('id',ticket.id).select('id').single();
+        if(error) throw error;
+      },{decorate:form=>{
+        form.elements.resposta.required=false;
+        form.elements.resposta.maxLength=5000;
+      }}),card);
+    }
+  }).catch(error=>{if(list.isConnected) list.textContent=error.message;});
+}
+
 function renderMasterPage(view) {
-  const commercial = {masterAssinaturas:'assinatura',masterFinanceiro:'cobranca',masterSuporte:'suporte'};
+  if(page==='masterSuporte') { renderCustomerTickets(view,true); return; }
+  const commercial = {masterAssinaturas:'assinatura',masterFinanceiro:'cobranca'};
   if (page==='clientes' || commercial[page]) {
     renderCommercialDashboard(view,commercial[page]);
     return;
@@ -760,7 +817,7 @@ function renderMasterPage(view) {
     return;
   }
   if(page==='masterAuditoria') {
-    const labels={gestao_comercial:'Financeiro, assinaturas e suporte',interesses_comerciais:'Solicitações comerciais',aparencia_telas:'Aparência'};
+    const labels={gestao_comercial:'Financeiro, assinaturas e suporte',interesses_comerciais:'Solicitações comerciais',aparencia_telas:'Aparência',chamados_clientes:'Atendimento de chamados'};
     renderMasterRecords(view,'auditoria_plataforma','ocorrido_em,usuario_id,recurso,acao,registro',100,(section,row)=>{
       panel(section,'<strong>'+escape(labels[row.recurso]??row.recurso)+'</strong><p>'+
         (row.acao==='INSERT'?'Cadastro':'Alteração')+' · '+escape(new Date(row.ocorrido_em).toLocaleString('pt-BR'))+
@@ -2014,7 +2071,7 @@ function render() {
   if (page === 'documentacao') { renderAcervo(view).catch(error=>message(error.message)); return; }
   if (page === 'relatorios') { renderReports(view); return; }
   if (page === 'orgaos' || page === 'catalogo') { renderRegistry(view,page === 'orgaos'); return; }
-  if (page === 'ajuda') { renderHelp(view); return; }
+  if (page === 'ajuda') { if(client && group && !master) renderCustomerTickets(view); renderHelp(view); return; }
   if (Object.hasOwn(pendingScreens,page)) {
     panel(view,'<h2>Em implantação</h2><p>'+escape(pendingScreens[page])+'</p>');
     return;
