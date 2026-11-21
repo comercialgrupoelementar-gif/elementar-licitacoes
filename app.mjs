@@ -838,6 +838,28 @@ async function postSupportMessage(ticket, text, file) {
 }
 
 let notificationTicket;
+const headerDateFormat=new Intl.DateTimeFormat('pt-BR',{timeZone:'America/Sao_Paulo',dateStyle:'short'});
+const headerTimeFormat=new Intl.DateTimeFormat('pt-BR',{timeZone:'America/Sao_Paulo',hour:'2-digit',minute:'2-digit',second:'2-digit'});
+let headerClockTimer;
+
+function mountAccountStatus(account,customer) {
+  const status=document.createElement('div');
+  status.className='account-status';
+  status.innerHTML='<time></time><small></small>';
+  const clock=status.querySelector('time');
+  const validity=status.querySelector('small');
+  const expiry=[customer?.acesso_ate,customer?.memberExpiry].filter(Boolean).sort()[0];
+  validity.textContent=expiry?'Válida até '+expiry.split('-').reverse().join('/'):customer||master?'Validade indeterminada':'Validade indisponível';
+  function tick() {
+    const now=new Date();
+    clock.textContent=headerDateFormat.format(now)+' · '+headerTimeFormat.format(now);
+    clock.dateTime=now.toISOString();
+  }
+  tick();
+  headerClockTimer=window.setInterval(tick,1000);
+  account.prepend(status);
+}
+
 function mountNotifications(account) {
   if (!master && !group) return;
   const area=document.createElement('details');
@@ -2441,6 +2463,7 @@ function applyScreenAppearance(view) {
 
 let previousScreen;
 function render() {
+  window.clearInterval(headerClockTimer);
   const currentScreen = [group,page,activeEdital,detailMode,Boolean(session)].join(':');
   if (previousScreen !== currentScreen) {
     document.querySelector('.workspace').scrollTop = 0;
@@ -2505,6 +2528,7 @@ function render() {
       session = null; group = null; master = false; groups = []; clients = []; team = []; page = 'painel'; activeEdital = null; await load(); render();
     },account);
     mountNotifications(account);
+    mountAccountStatus(account,customer);
     signout.className = 'signout';
     signout.setAttribute('aria-label','Sair');
     signout.title = 'Sair';
@@ -3010,9 +3034,9 @@ function renderProposal(view,row) {
 }
 
 async function loadGroups(){
-  const {data,error}=await client.from('membros').select('papel,alias_empresa,grupos(id,nome,acesso_modo)');
+  const {data,error}=await client.from('membros').select('papel,alias_empresa,acesso_ate,grupos(id,nome,acesso_modo,acesso_ate)');
   if(error) throw error;
-  groups=data.filter(m=>m.grupos).map(m=>({...m.grupos,role:m.grupos.acesso_modo==='leitura'?'leitor':m.papel,alias:m.alias_empresa}));
+  groups=data.filter(m=>m.grupos).map(m=>({...m.grupos,role:m.grupos.acesso_modo==='leitura'?'leitor':m.papel,alias:m.alias_empresa,memberExpiry:m.acesso_ate}));
   const capability = await client.rpc('licitacoes_eh_mestre');
   if (capability.error && capability.error.code !== 'PGRST202') throw capability.error;
   master = capability.data === true;
