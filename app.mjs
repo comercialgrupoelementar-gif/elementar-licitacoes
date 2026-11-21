@@ -631,12 +631,14 @@ function mountCargoManagement(parent,empresa,mestre=false) {
   }
 }
 
+let teamNames={};
 async function openTeam() {
   team = await call('licitacoes_equipe',{cliente:group});
+  teamNames=await call('licitacoes_nomes_equipe',{empresa:group});
   page = 'equipe'; activeEdital = null; render();
 }
 
-function renderVisualPreview(parent,customerId) {
+function renderVisualPreview(parent,customerId,modules=Object.keys(screens)) {
   const section=panel(parent,'<h3>Aparência por tela</h3>');
   const preview=panel(section,'<h2></h2><p>Texto, títulos e ações da tela</p>');
   const controls=document.createElement('div');
@@ -659,7 +661,7 @@ function renderVisualPreview(parent,customerId) {
     Object.assign(element,{min,max,value});
     return element;
   }
-  const screen=select('Tela',Object.entries(screens));
+  const screen=select('Tela',modules.map(key=>[key,screens[key]]));
   const font=select('Fonte',[['inherit','Padrão'],['system-ui','Sistema'],['Georgia, serif','Georgia'],['monospace','Monoespaçada']]);
   const align=select('Alinhamento',[['left','Esquerda'],['center','Centro'],['right','Direita']]);
   const size=slider('Tamanho do texto',12,22,14);
@@ -1202,16 +1204,71 @@ function renderMemberProfiles(section,customerId,members,refresh) {
 }
 
 function renderTeam(view) {
+  const section=panel(view,'<h2>Integrantes</h2><p class="muted">Vincule contas cadastradas à empresa e defina seus cargos.</p>');
+  section.classList.add('settings-section');
+  action('Adicionar integrante',async ()=>{
+    const state=await call('licitacoes_painel_cargos',{empresa:group});
+    const options=[['base','Sem cargo personalizado'],...state.cargos.map(cargo=>[cargo.id,cargo.nome])];
+    edit('Adicionar integrante',[
+      ['nome_usuario','Nome de exibição','text'],
+      ['email_membro','E-mail da conta cadastrada','email'],
+      ['papel_membro','Perfil básico','select','operador',[['operador','Operador'],['leitor','Leitor']]],
+      ['cargo','Cargo na empresa','select','base',options]
+    ],async ({cargo,...values})=>{
+      await call('licitacoes_vincular_integrante',{...values,cliente:group,cargo:cargo==='base'?null:cargo});
+    },{onSaved:()=>openTeam().catch(error=>message(error.message)),decorate:form=>{
+      form.elements.nome_usuario.minLength=2;
+      form.elements.nome_usuario.maxLength=80;
+      const hint=document.createElement('p');
+      hint.className='muted';
+      hint.textContent='O integrante precisa ter uma conta confirmada. Você pode criar cargos personalizados na seção Cargos e regras da equipe.';
+      form.prepend(hint);
+    }});
+  },section,true);
+  for(const member of team) {
+    const details=teamNames[member.usuario_id];
+    const card=panel(section,'<strong>'+escape(details?.nome||member.email)+'</strong><p>'+escape(member.email)+' · '+escape(details?.cargo||({admin:'Administrador',operador:'Operador',leitor:'Leitor'}[member.papel]))+'</p>');
+    if(member.papel!=='admin') renderMemberProfiles(card,group,[member],()=>openTeam());
+  }
   mountCargoManagement(view,group);
-  const section = panel(view,'<h2>Equipe da empresa</h2><p>Gerencie o acesso ao seu espaço de trabalho.</p>');
-  action('Adicionar integrante', () => edit('Adicionar integrante',[
-    ['email_membro','E-mail do usuário cadastrado','email'],
-    ['papel_membro','Perfil','select','operador',[['operador','Operador'],['leitor','Leitor']]]
-  ], async values => {
-    await call('licitacoes_adicionar_membro',{...values,cliente:group});
-    team = await call('licitacoes_equipe',{cliente:group});
-  }),section,true);
-  renderMemberProfiles(section,group,team,()=>openTeam());
+}
+
+const settingsCategories=[
+  ['Empresa e documentos',['configuracoes','documentacao']],
+  ['Captação e propostas',['editais','propostas','propostaPronta','disputa']],
+  ['Operação e entregas',['orgaos','catalogo','acompanhamento','finalizados','logistica']],
+  ['Compras e financeiro',['cotacoes','orcamento','financeiro']],
+  ['Aparência e navegação',['painel','aplicativo','ajuda']]
+];
+let selectedSettings=0;
+
+function renderCompanySettings(view) {
+  const nav=document.createElement('nav');
+  nav.className='settings-nav';
+  nav.setAttribute('aria-label','Seções de configurações');
+  const body=document.createElement('div');
+  view.append(nav,body);
+  const tabs=settingsCategories.map(([label],index)=>action(label,()=>show(index),nav));
+  show(selectedSettings);
+
+  function show(index) {
+    selectedSettings=index;
+    tabs.forEach((button,i)=>button.setAttribute('aria-current',i===index?'true':'false'));
+    body.replaceChildren();
+    const [label,modules]=settingsCategories[index];
+    const section=panel(body,'<h2>'+label+'</h2>');
+    section.classList.add('settings-section');
+    if(index===0) {
+      section.insertAdjacentHTML('beforeend','<h3>CNPJs participantes</h3><p class="muted">Gerencie os dados e a identidade dos documentos de cada CNPJ.</p>');
+      writeAction('Cadastrar CNPJ',company,section,true);
+      if(!db.empresas.length) section.insertAdjacentHTML('beforeend','<p class="muted">Nenhum CNPJ cadastrado.</p>');
+      for(const companyRecord of db.empresas) {
+        const card=panel(section,'<strong>'+escape(companyRecord.nome)+'</strong><p>'+escape(companyRecord.cnpj)+' · '+escape(companyRecord.porte)+'</p>');
+        writeAction('Logo e dados para propostas',()=>companyProposalSettings(companyRecord),card);
+      }
+    }
+    if(client && canWrite()) renderVisualPreview(section,group,modules);
+  }
 }
 
 function renderEditalIndex(view, docs) {
@@ -2418,19 +2475,7 @@ function render() {
   if (page === 'painel') {
     renderOverview(view);
   } else if (page === 'configuracoes') {
-    if(client && groupRole()!=='admin') return;
-    if(client && canWrite()) {
-      const settings=panel(view,'<h2>Configurações por tela</h2><p>Ajuste a apresentação de cada módulo para sua equipe.</p>');
-      renderVisualPreview(settings,group);
-      action('Abrir Minha equipe',openTeam,settings);
-    }
-    const section = panel(view,'<h2>CNPJs participantes</h2><p>Cadastre os CNPJs que sua empresa usa para participar de licitações. Eles ficam disponíveis para seleção no edital.</p>');
-    writeAction('Cadastrar CNPJ',company,section,true);
-    if (!db.empresas.length) section.insertAdjacentHTML('beforeend','<p class="muted">Nenhum CNPJ cadastrado.</p>');
-    for (const e of db.empresas) {
-      const company = panel(section,'<strong>'+escape(e.nome)+'</strong><p>'+escape(e.cnpj)+' · '+escape(e.porte)+'</p>');
-      writeAction('Logo e dados para propostas',()=>companyProposalSettings(e),company);
-    }
+    if(!client || groupRole()==='admin') renderCompanySettings(view);
   } else {
     writeAction('Nova oportunidade',()=>edital(),view,true);
     const grid = document.createElement('div');
