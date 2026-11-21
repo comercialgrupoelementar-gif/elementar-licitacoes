@@ -742,54 +742,172 @@ function renderMasterRecords(view, table, columns, limit, prepare) {
     }).catch(error=>{if(section.isConnected) section.textContent=error.message;});
 }
 
+const supportFileTypes = ['application/pdf','image/png','image/jpeg','image/webp','text/plain'];
+const supportFileAccept = '.pdf,.png,.jpg,.jpeg,.webp,.txt';
+const supportDate = value=>new Date(value).toLocaleString('pt-BR');
+const supportProtocol = ticket=>'EL-'+String(ticket.protocolo).padStart(6,'0');
+
+function validateSupportFile(file) {
+  if (!file?.size) return;
+  if (file.size > 10*1024*1024 || !supportFileTypes.includes(file.type)) {
+    throw new Error('Use um PDF, PNG, JPEG, WebP ou TXT de até 10 MB.');
+  }
+}
+
+async function postSupportMessage(ticket, text, file) {
+  validateSupportFile(file);
+  const row={chamado_id:ticket.id,texto:text.trim()};
+  if(file?.size) {
+    const path=ticket.id+'/'+session.user.id+'/'+crypto.randomUUID();
+    const {error}=await client.storage.from('chamados-anexos').upload(path,file);
+    if(error) throw error;
+    row.anexo_caminho=path;
+    row.anexo_nome=file.name.slice(0,255);
+  }
+  const {error}=await client.from('chamado_mensagens').insert(row);
+  if(error) throw error;
+}
+
 function renderCustomerTickets(view, attending=false) {
   const section=panel(view,attending?'<h2>Fila de chamados das empresas</h2>':'<h2>Chamados da empresa</h2>');
-  if (!attending) action('Abrir chamado',()=>edit('Abrir chamado',[
-    ['assunto','Assunto','text'],['descricao','Descrição','textarea']
-  ],async values=>{
-    const {error}=await client.from('chamados_clientes').insert({...values,grupo_id:group});
-    if(error) throw error;
-  },{decorate:form=>{
-    form.elements.assunto.maxLength=180;
-    form.elements.assunto.minLength=3;
-    form.elements.descricao.maxLength=5000;
-    form.elements.descricao.minLength=5;
-  }}),section,true);
   const list=document.createElement('div');
-  list.textContent='Carregando chamados…';
-  section.append(list);
-  let query=client.from('chamados_clientes').select('id,grupo_id,assunto,descricao,situacao,resposta,criado_em,atualizado_em').order('criado_em',{ascending:false});
-  if (!attending) query=query.eq('grupo_id',group);
-  Promise.resolve(query).then(({data,error})=>{
-    if(!list.isConnected) return;
+  const conversation=document.createElement('div');
+  let selectedId;
+
+  if (!attending) action('Abrir chamado',()=>edit('Abrir chamado',[
+    ['contato_nome','Nome','text'],['contato_email','E-mail','email',session.user.email],
+    ['contato_whatsapp','WhatsApp com DDD','tel'],['contato_cargo','Cargo','text'],
+    ['assunto','Assunto','text'],['descricao','Descrição do problema','textarea'],
+    ['anexo','Anexo do problema (até 10 MB)','file']
+  ],async ({anexo,...values})=>{
+    validateSupportFile(anexo);
+    const {data,error}=await client.from('chamados_clientes').insert({...values,grupo_id:group}).select('id').single();
     if(error) throw error;
+    selectedId=data.id;
+    if(anexo?.size) {
+      try { await postSupportMessage(data,'Anexo enviado na abertura do chamado.',anexo); }
+      catch (error) { message('Chamado criado. Reenvie o anexo na conversa. '+error.message); }
+    }
+  },{decorate:form=>{
+    Object.entries({contato_nome:120,contato_email:254,contato_whatsapp:40,contato_cargo:120,assunto:180,descricao:5000})
+      .forEach(([name,length])=>{form.elements[name].maxLength=length;});
+    form.elements.assunto.minLength=3;
+    form.elements.descricao.minLength=5;
+    form.elements.anexo.accept=supportFileAccept;
+  },onSaved:()=>refreshList()}),section,true);
+
+  action('Atualizar chamados',()=>refreshList(),section);
+  section.append(list,conversation);
+
+  async function refreshList() {
+    let query=client.from('chamados_clientes').select(
+      'id,protocolo,grupo_id,contato_nome,contato_email,contato_whatsapp,contato_cargo,assunto,descricao,situacao,resposta,criado_em,atualizado_em'
+    ).order('criado_em',{ascending:false});
+    if (!attending) query=query.eq('grupo_id',group);
+    const {data,error}=await query;
+    if(!list.isConnected) return;
+    if(error) { list.textContent=error.message; return; }
     list.replaceChildren();
     if(!data.length) list.textContent='Nenhum chamado registrado.';
     if(attending) data.sort((a,b)=>Number(a.situacao==='Resolvido')-Number(b.situacao==='Resolvido'));
     for(const ticket of data) {
       const company=attending ? clients.find(row=>row.id===ticket.grupo_id)?.nome : '';
-      const card=panel(list,'<strong>'+escape(ticket.assunto)+'</strong><p>'+
-        (company?escape(company)+' · ':'')+escape(ticket.situacao)+' · '+escape(new Date(ticket.criado_em).toLocaleString('pt-BR'))+'</p>');
-      for(const [label,value] of [['Descrição',ticket.descricao],['Resposta do suporte',ticket.resposta]]) {
-        if (!value) continue;
-        const detail=document.createElement('p');
-        detail.style.whiteSpace='pre-wrap';
-        detail.textContent=label+': '+value;
-        card.append(detail);
-      }
-      if(attending) action('Atender chamado',()=>edit('Atender chamado',[
-        ['situacao','Situação','select',ticket.situacao,['Aberto','Em atendimento','Resolvido']],
-        ['resposta','Resposta para a empresa','textarea',ticket.resposta]
-      ],async values=>{
-        if(values.situacao==='Resolvido' && !values.resposta.trim()) throw new Error('Escreva a solução antes de resolver o chamado.');
-        const {error}=await client.from('chamados_clientes').update(values).eq('id',ticket.id).select('id').single();
-        if(error) throw error;
-      },{decorate:form=>{
-        form.elements.resposta.required=false;
-        form.elements.resposta.maxLength=5000;
-      }}),card);
+      const card=panel(list,'<strong>'+supportProtocol(ticket)+' · '+escape(ticket.assunto)+'</strong><p>'+
+        (company?escape(company)+' · ':'')+escape(ticket.situacao)+' · '+escape(supportDate(ticket.criado_em))+'</p>');
+      action('Abrir conversa',()=>{selectedId=ticket.id;return showConversation(ticket);},card);
     }
-  }).catch(error=>{if(list.isConnected) list.textContent=error.message;});
+    const selected=data.find(ticket=>ticket.id===selectedId);
+    if(selected) await showConversation(selected);
+    else conversation.replaceChildren();
+  }
+
+  async function showConversation(ticket) {
+    selectedId=ticket.id;
+    conversation.replaceChildren();
+    const card=panel(conversation,'<h3>Protocolo '+supportProtocol(ticket)+'</h3><p>'+escape(ticket.assunto)+' · '+escape(ticket.situacao)+'</p>');
+    for(const [label,value] of [['Nome',ticket.contato_nome],['E-mail',ticket.contato_email],['WhatsApp',ticket.contato_whatsapp],
+      ['Cargo',ticket.contato_cargo],['Descrição do problema',ticket.descricao],['Solução registrada',ticket.resposta]]) {
+      if (!value) continue;
+      const detail=document.createElement('p');
+      detail.className='support-text';
+      detail.textContent=label+': '+value;
+      card.append(detail);
+    }
+    if(attending) action('Atualizar atendimento',()=>edit('Atualizar atendimento',[
+      ['situacao','Situação','select',ticket.situacao,['Aberto','Em atendimento','Resolvido']],
+      ['resposta','Solução para a empresa','textarea',ticket.resposta]
+    ],async values=>{
+      if(values.situacao==='Resolvido' && !values.resposta.trim()) throw new Error('Registre a solução antes de resolver o chamado.');
+      const {error}=await client.from('chamados_clientes').update(values).eq('id',ticket.id).select('id').single();
+      if(error) throw error;
+    },{decorate:form=>{form.elements.resposta.required=false;form.elements.resposta.maxLength=5000;},onSaved:()=>refreshList()}),card);
+
+    const history=panel(card,'<h3>Conversa</h3>');
+    const messages=document.createElement('div');
+    messages.setAttribute('aria-live','polite');
+    history.append(messages);
+    action('Atualizar conversa',loadMessages,history);
+    const form=document.createElement('form');
+    form.innerHTML='<label>Mensagem<textarea name="texto" maxlength="5000" rows="3"></textarea></label>'+
+      '<label>Anexar arquivo (até 10 MB)<input name="arquivo" type="file"></label>'+
+      '<button type="submit" class="primary">Enviar mensagem</button><p role="status"></p>';
+    form.elements.arquivo.accept=supportFileAccept;
+    history.append(form);
+    form.onsubmit=async event=>{
+      event.preventDefault();
+      const status=form.querySelector('[role=status]');
+      const {texto,arquivo}=Object.fromEntries(new FormData(form));
+      event.submitter.disabled=true;
+      try {
+        status.textContent='';
+        if(!texto.trim() && !arquivo.size) throw new Error('Escreva uma mensagem ou selecione um arquivo.');
+        await postSupportMessage(ticket,texto,arquivo);
+        form.reset();
+        status.textContent='Mensagem enviada.';
+        await loadMessages();
+      } catch(error) {status.textContent=error.message;}
+      finally {event.submitter.disabled=false;}
+    };
+    let messageSignature;
+    await loadMessages();
+    if (messages.isConnected) {
+      const refreshTimer=setInterval(()=>{
+        if(!messages.isConnected) {clearInterval(refreshTimer);return;}
+        if(!document.hidden) loadMessages().catch(error=>message(error.message));
+      },8000);
+    }
+
+    async function loadMessages() {
+      const {data,error}=await client.from('chamado_mensagens').select('autor_nome,suporte,enviada_em,texto,anexo_caminho,anexo_nome')
+        .eq('chamado_id',ticket.id).order('enviada_em').order('id');
+      if(!messages.isConnected) return;
+      if(error) {messageSignature=undefined;messages.textContent=error.message;return;}
+      const signature=JSON.stringify(data);
+      if(signature===messageSignature) return;
+      messageSignature=signature;
+      messages.replaceChildren();
+      if(!data.length) messages.textContent='Nenhuma mensagem na conversa.';
+      for(const entry of data) {
+        const row=panel(messages,'<strong>'+escape(entry.suporte?'Suporte E-Lementar · '+entry.autor_nome:entry.autor_nome)+'</strong><small> · '+escape(supportDate(entry.enviada_em))+'</small>');
+        if(entry.texto) {
+          const text=document.createElement('p');
+          text.className='support-text';
+          text.textContent=entry.texto;
+          row.append(text);
+        }
+        if(entry.anexo_caminho) action('Baixar '+entry.anexo_nome,async ()=>{
+          const {data,error}=await client.storage.from('chamados-anexos').download(entry.anexo_caminho);
+          if(error) throw error;
+          const url=URL.createObjectURL(data);
+          const link=document.createElement('a');
+          link.href=url;link.download=entry.anexo_nome;document.body.append(link);link.click();link.remove();
+          setTimeout(()=>URL.revokeObjectURL(url),1000);
+        },row);
+      }
+    }
+  }
+
+  refreshList().catch(error=>{if(list.isConnected) list.textContent=error.message;});
 }
 
 function renderMasterPage(view) {
