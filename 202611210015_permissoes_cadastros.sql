@@ -79,7 +79,7 @@ end $$;
 -- Mantém a restrição também quando o catálogo é alterado por uma RPC SECURITY DEFINER.
 create function controle_licitacoes.verificar_edicao_catalogo()
 returns trigger language plpgsql security definer set search_path=''
-as $
+as $func$
 begin
   if auth.uid() is not null and (
     not public.licitacoes_permite_cadastro(old.grupo_id,'catalogo','editar')
@@ -88,7 +88,7 @@ begin
     raise exception 'Edição do catálogo bloqueada para esta conta' using errcode='42501';
   end if;
   return new;
-end $;
+end $func$;
 revoke all on function controle_licitacoes.verificar_edicao_catalogo() from public,anon,authenticated;
 create trigger verificar_edicao_catalogo before update on public.catalogo
 for each row execute function controle_licitacoes.verificar_edicao_catalogo();
