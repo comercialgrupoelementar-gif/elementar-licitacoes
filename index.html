@@ -92,9 +92,36 @@ h2{font-size:24px}h3{font-size:18.72px}
 .dispute-table input[type=number]{width:112px;font-variant-numeric:tabular-nums}
 .overview-year-filter{width:max-content;max-width:100%;padding:8px 10px;margin-top:12px}
 .overview-year-filter select{width:100%;min-width:7.5rem;padding:5px 8px;text-overflow:ellipsis}
+
+#mobile-menu{display:none}
+@media(max-width:900px){
+.shell{grid-template-columns:minmax(0,1fr)}
+.workspace,.content,#view,#view>.panel,.pagehead>div,.auth-layout>section{min-width:0}
+.sidebar{position:static;height:auto;padding:10px 14px;display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:6px}
+.sidebar .brand-space{padding:0}.sidebar .nav-caption,.sidebar-foot,.workspace-tag,.sidebar .wordmark small{display:none}
+#mobile-menu{display:inline-block;width:auto;min-height:44px;padding:6px 14px;border-color:#ffffff40;font-size:14px}
+.sidebar #nav{display:none;grid-column:1/-1;min-width:0;max-height:55vh;overflow:auto}
+.sidebar #mobile-menu[aria-expanded=true]+#nav{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(145px,100%),1fr))}
+.sidebar #nav button{min-height:44px;white-space:normal}
+.sidebar #nav select{width:100%;max-width:none;margin:0;grid-column:1/-1}
+.topbar{height:auto;min-height:52px;padding:8px 14px;flex-wrap:wrap}
+.content{padding:14px 12px 36px}
+.pagehead{align-items:flex-start;flex-wrap:wrap;gap:8px;margin-bottom:14px}
+#page-actions{display:flex;flex-wrap:wrap;gap:6px}
+.overview-banner{flex-direction:column;min-height:0;padding:18px;gap:12px}
+.banner-side{border-left:0;border-top:1px solid #ffffff20;padding:10px 0 0;align-self:stretch}
+.overview-metrics{grid-template-columns:repeat(auto-fit,minmax(min(140px,100%),1fr));gap:8px}
+.metric{min-width:0;padding:12px;overflow-wrap:anywhere}
+.scroll{max-width:100%;overflow-x:auto}
+.scroll table{width:max-content;min-width:100%}
+.auth-layout{grid-template-columns:minmax(0,1fr);min-height:0}
+.auth-intro,.auth-access{padding:20px 16px}
+dialog{width:calc(100% - 24px);max-height:85vh;max-height:85dvh;padding:14px;overflow:auto}
+input,select,textarea,.sidebar select{font-size:16px}
+}
 </style>
 <script defer src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<script id="app-entry" type="module" src="./app.mjs?v=20261120-27"></script>
+<script id="app-entry" type="module" src="./app.mjs?v=20261120-28"></script>
 </head>
 <body>
 <div id="version-notice" hidden style="padding:10px 18px;background:#f6e8d0">
@@ -105,6 +132,7 @@ h2{font-size:24px}h3{font-size:18.72px}
   <aside class="sidebar" aria-label="Central de telas">
     <div class="brand-space"><strong class="wordmark">E-Lementar<small>LICITAÇÕES</small></strong><span class="workspace-tag">GESTÃO INTEGRADA</span></div>
     <h2 class="nav-caption">SEU ESPAÇO DE TRABALHO</h2>
+    <button type="button" id="mobile-menu" aria-controls="nav" aria-expanded="false">Menu</button>
     <nav id="nav" aria-label="Módulos"></nav>
     <footer class="sidebar-foot"><span class="status-dot"></span> E-Lementar Licitações<div class="muted">Da oportunidade à entrega.</div></footer>
   </aside>
@@ -118,4 +146,15 @@ h2{font-size:24px}h3{font-size:18.72px}
   </div>
 </div>
 <dialog id="editor" aria-labelledby="editor-title"><h2 id="editor-title"></h2><form id="form"></form></dialog>
+<script>
+const mobileMenu = document.getElementById('mobile-menu');
+const mobileNav = document.getElementById('nav');
+mobileMenu.addEventListener('click', () => {
+  const expanded = mobileMenu.getAttribute('aria-expanded') === 'true';
+  mobileMenu.setAttribute('aria-expanded', String(!expanded));
+});
+mobileNav.addEventListener('click', event => {
+  if (event.target.closest('button')) mobileMenu.setAttribute('aria-expanded', 'false');
+});
+</script>
 </body></html>
