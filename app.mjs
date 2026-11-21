@@ -108,7 +108,9 @@ function edit(title, fields, save, options = {}) {
   dialog.showModal();
 }
 
+let screenAppearance=[];
 async function load() {
+  screenAppearance=[];
   if (!client) {
     const data = JSON.parse(localStorage.getItem(localKey) || '{}');
     allTables.forEach(table => { db[table] = data[table] ?? []; });
@@ -122,6 +124,9 @@ async function load() {
   const responses = await Promise.all(allTables.map(table => client.from(table).select(table === 'editais'
     ? 'id,grupo_id,empresa_id,numero,numero_pregao,orgao,modalidade,sessao,status,parecer,edital_url,local_disputa,edital_pdf_nome,objeto,modo_disputa,etapa_proposta'
     : table==='cotacoes' ? 'id,grupo_id,empresa_id,titulo,fornecedor,email,observacao,etapa,itens,historico,revisao,criado_em,tipo,orgao_id,assinado_em' : '*').eq('grupo_id',group)));
+  const visual=await client.from('aparencia_telas').select('tela,ajustes').eq('grupo_id',group);
+  if(visual.error && !['PGRST205','42P01'].includes(visual.error.code)) throw visual.error;
+  screenAppearance=visual.data??[];
   const missing = new Set();
   responses.forEach(({error},i) => {
     if (!error) return;
@@ -564,7 +569,7 @@ async function call(name, args) {
 }
 
 async function openClients() {
-  clients = await call('licitacoes_clientes');
+  [clients] = await Promise.all([call('licitacoes_clientes'),loadCommercialRecords()]);
   page = 'clientes'; activeEdital = null; render();
 }
 
@@ -573,7 +578,132 @@ async function openTeam() {
   page = 'equipe'; activeEdital = null; render();
 }
 
+function renderVisualPreview(parent,customerId) {
+  const section=panel(parent,'<h3>Aparência por tela</h3>');
+  const preview=panel(section,'<h2></h2><p>Texto, títulos e ações da tela</p>');
+  const controls=document.createElement('div');
+  controls.className='line';
+  section.insertBefore(controls,preview);
+  function field(label,element) {
+    const wrapper=document.createElement('label');
+    wrapper.append(label,element);
+    controls.append(wrapper);
+    return element;
+  }
+  function select(label, options) {
+    const element=field(label,document.createElement('select'));
+    for(const [value,name] of options) element.add(new Option(name,value));
+    return element;
+  }
+  function slider(label,min,max,value) {
+    const element=field(label,document.createElement('input'));
+    element.type='range';
+    Object.assign(element,{min,max,value});
+    return element;
+  }
+  const screen=select('Tela',Object.entries(screens));
+  const font=select('Fonte',[['inherit','Padrão'],['system-ui','Sistema'],['Georgia, serif','Georgia'],['monospace','Monoespaçada']]);
+  const align=select('Alinhamento',[['left','Esquerda'],['center','Centro'],['right','Direita']]);
+  const size=slider('Tamanho do texto',12,22,14);
+  const title=slider('Tamanho do título',16,40,24);
+  const padding=slider('Espaçamento interno',8,40,16);
+  const width=slider('Largura do painel (%)',35,100,100);
+  const example=action('Exemplo de botão',()=>{},preview);
+  example.disabled=true;
+  const draw=()=>{
+    preview.querySelector('h2').textContent=screens[screen.value];
+    Object.assign(preview.style,{fontFamily:font.value,textAlign:align.value,fontSize:size.value+'px',
+      padding:padding.value+'px',width:width.value+'%',overflowWrap:'anywhere'});
+    Object.assign(preview.querySelector('h2').style,{fontFamily:'inherit',fontSize:title.value+'px'});
+  };
+  const fields={font,align,size,title,padding,width};
+  async function loadAppearance() {
+    const {data,error}=await client.from('aparencia_telas').select('ajustes').match({grupo_id:customerId,tela:screen.value}).maybeSingle();
+    if(error) throw error;
+    const defaults={font:'inherit',align:'left',size:12,title:24,padding:16,width:100};
+    for(const [key,input] of Object.entries(fields)) input.value=data?.ajustes[key]??defaults[key];
+    draw();
+  }
+  screen.addEventListener('change',()=>loadAppearance().catch(error=>message(error.message)));
+  controls.addEventListener('input',draw);
+  action('Salvar aparência',async()=>{
+    const ajustes=Object.fromEntries(Object.entries(fields).map(([key,input])=>[key,input.value]));
+    const {error}=await client.from('aparencia_telas').upsert({grupo_id:customerId,tela:screen.value,ajustes});
+    if(error) throw error;
+    if(customerId===group) await load();
+    message('Aparência salva.');
+  },section);
+  draw();
+  loadAppearance().catch(error=>message(error.message));
+}
+
+let commercialRecords = [];
+const commercialSections = {
+  assinatura: ['Assinaturas', 'Configurar assinatura', ['Ativa','Em avaliação','Suspensa','Cancelada']],
+  cobranca: ['Financeiro comercial', 'Registrar cobrança', ['Pendente','Recebida','Cancelada']],
+  suporte: ['Suporte interno', 'Registrar chamado', ['Aberto','Em atendimento','Resolvido']]
+};
+
+async function loadCommercialRecords() {
+  const {data,error} = await client.from('gestao_comercial').select('*').order('prazo');
+  if (error) throw new Error(error.message);
+  commercialRecords = data;
+}
+
+function editCommercialRecord(type, record = {}) {
+  const [,label,states] = commercialSections[type];
+  const companies = clients.filter(company => type !== 'assinatura' || company.id === record.grupo_id ||
+    !commercialRecords.some(entry => entry.tipo === type && entry.grupo_id === company.id));
+  if (!companies.length) throw new Error('Nenhuma empresa disponível para este registro.');
+  const fields = [
+    ['grupo_id','Empresa','select',record.grupo_id,companies.map(company => [company.id,company.nome])],
+    ['titulo',type === 'assinatura' ? 'Plano' : 'Título','text',record.titulo],
+    ['situacao','Situação','select',record.situacao,states],
+    ['prazo',type === 'suporte' ? 'Prazo de atendimento' : 'Vencimento','date',record.prazo],
+    ['observacao','Observação','textarea',record.observacao]
+  ];
+  if (type !== 'suporte') fields.splice(3,0,['valor',type === 'assinatura' ? 'Mensalidade (R$)' : 'Valor (R$)','number',record.valor ?? 0]);
+  edit(label,fields,async values => {
+    const payload = {...values,tipo:type,valor:Number(values.valor ?? 0)};
+    const table = client.from('gestao_comercial');
+    const result = record.id ? await table.update(payload).eq('id',record.id).select('id').single() : await table.insert(payload);
+    if (result.error) throw new Error(result.error.message);
+    await loadCommercialRecords();
+  });
+}
+
+function renderCommercialDashboard(view) {
+  const today = new Intl.DateTimeFormat('sv-SE',{timeZone:'America/Sao_Paulo'}).format(new Date());
+  const money = new Intl.NumberFormat('pt-BR',{style:'currency',currency:'BRL',minimumFractionDigits:4});
+  const pending = commercialRecords.filter(entry => entry.tipo === 'cobranca' && entry.situacao === 'Pendente');
+  const summary = panel(view,'<h2>Operação da plataforma</h2>');
+  const indicators = document.createElement('div');
+  indicators.className = 'line';
+  summary.append(indicators);
+  for (const [title,value] of [
+    ['Empresas',clients.length],
+    ['Assinaturas ativas',commercialRecords.filter(entry => entry.tipo === 'assinatura' && entry.situacao === 'Ativa').length],
+    ['Cobranças vencidas',pending.filter(entry => entry.prazo < today).length],
+    ['A receber',money.format(pending.reduce((sum,entry) => sum + Number(entry.valor),0))],
+    ['Chamados pendentes',commercialRecords.filter(entry => entry.tipo === 'suporte' && entry.situacao !== 'Resolvido').length]
+  ]) panel(indicators,'<strong>'+title+'</strong><p>'+value+'</p>');
+  for (const [type,[title,label]] of Object.entries(commercialSections)) {
+    const section = panel(view,'<h2>'+title+'</h2>');
+    action(label,()=>editCommercialRecord(type),section,true);
+    const rows = commercialRecords.filter(entry => entry.tipo === type);
+    if (!rows.length) section.append(Object.assign(document.createElement('p'),{textContent:'Nenhum registro cadastrado.'}));
+    for (const entry of rows) {
+      const company = clients.find(customer => customer.id === entry.grupo_id);
+      const value = type === 'suporte' ? '' : ' · '+money.format(entry.valor);
+      const card = panel(section,'<strong>'+escape(entry.titulo)+'</strong><p>'+escape(company?.nome ?? 'Empresa')+
+        ' · '+escape(entry.situacao)+' · '+escape(entry.prazo.split('-').reverse().join('/'))+value+'</p><p>'+escape(entry.observacao)+'</p>');
+      action('Editar',()=>editCommercialRecord(type,entry),card);
+    }
+  }
+}
+
 function renderClients(view) {
+  renderCommercialDashboard(view);
   const section = panel(view,'<h2>Mestre Gerenciador</h2><p>Cadastre empresas clientes e defina o administrador de cada espaço.</p>');
   action('Cadastrar empresa cliente', () => edit('Nova empresa cliente', [
     ['nome_cliente','Nome da empresa','text'],['email_admin','E-mail do administrador cadastrado','email']
@@ -584,6 +714,14 @@ function renderClients(view) {
   for (const customer of clients) {
     const card=panel(section,'<strong>'+escape(customer.nome)+'</strong><p>'+escape(customer.integrantes)+' integrante(s)</p>');
     const members=panel(card,'<h3>Permissões por conta</h3>');
+    action('Configurar aparência',()=>{
+      const existing=card.querySelector('[data-aparencia]');
+      if(existing) {existing.remove();return;}
+      const settings=document.createElement('div');
+      settings.dataset.aparencia='';
+      card.append(settings);
+      renderVisualPreview(settings,customer.id);
+    },card);
     action('Consultar integrantes',()=>{
       showMemberProfiles(members,customer.id).catch(error=>message(error.message));
     },card);
@@ -597,10 +735,29 @@ async function showMemberProfiles(section,customerId) {
   renderMemberProfiles(section,customerId,members,()=>showMemberProfiles(section,customerId).catch(error=>message(error.message)));
 }
 
+const registryPermissionResources=[['catalogo','Produtos / Serviços'],['orgaos_compradores','Prefeituras / Clientes']];
+const registryPermissionActions=[['visualizar','Visualizar'],['cadastrar','Cadastrar'],['editar','Editar'],['excluir','Excluir']];
+
+async function editRegistryPermissions(customerId,member,refresh) {
+  const identity={cliente:customerId,integrante:member.usuario_id};
+  const saved=await call('licitacoes_permissoes_cadastro',identity);
+  const fields=registryPermissionResources.flatMap(([resource,label])=>registryPermissionActions.map(([permission,verb])=>{
+    const current=saved.find(row=>row.recurso===resource && row.acao===permission);
+    return [resource+'_'+permission,label+' — '+verb,'select',current?.permitido===false?'bloquear':'perfil',
+      [['perfil','Seguir o perfil'],['bloquear','Bloquear']]];
+  }));
+  edit('Permissões de '+member.email,fields,async values=>{
+    const permissoes=registryPermissionResources.flatMap(([recurso])=>registryPermissionActions
+      .filter(([acao])=>values[recurso+'_'+acao]==='bloquear').map(([acao])=>({recurso,acao,permitido:false})));
+    await call('licitacoes_salvar_permissoes_cadastro',{...identity,permissoes});
+  },{onSaved:refresh});
+}
+
 function renderMemberProfiles(section,customerId,members,refresh) {
   for(const member of members) {
     const card=panel(section,'<strong>'+escape(member.email)+'</strong><p>'+({admin:'Administrador',operador:'Operador',leitor:'Leitor'}[member.papel]??'')+'</p>');
     if(!['operador','leitor'].includes(member.papel)) continue;
+    action('Permissões de cadastros',()=>editRegistryPermissions(customerId,member,refresh),card);
     action('Alterar perfil',()=>edit('Permissões da conta '+member.email,[
       ['novo_perfil','Perfil','select',member.papel,[['operador','Operador'],['leitor','Leitor']]]
     ],async values=>{
@@ -1669,10 +1826,25 @@ function renderHelp(view) {
   draw();
 }
 
+function applyScreenAppearance(view) {
+  const settings=screenAppearance.find(entry=>entry.tela===page)?.ajustes;
+  const content=view.closest('main');
+  for(const key of ['font','align','size','title','padding','width']) content.style.removeProperty('--page-'+key);
+  if(!settings) return;
+  const allowedFonts=['inherit','system-ui','Georgia, serif','monospace'];
+  if(allowedFonts.includes(settings.font)) content.style.setProperty('--page-font',settings.font);
+  if(['left','center','right'].includes(settings.align)) content.style.setProperty('--page-align',settings.align);
+  for(const [key,min,max,unit] of [['size',12,22,'px'],['title',16,40,'px'],['padding',8,40,'px'],['width',35,100,'%']]) {
+    const value=Number(settings[key]);
+    if(Number.isFinite(value)&&value>=min&&value<=max) content.style.setProperty('--page-'+key,value+unit);
+  }
+}
+
 function render() {
   const nav = byId('nav');
   const view = byId('view');
   const account = byId('account');
+  applyScreenAppearance(view);
   for (const node of [nav,view,account,byId("page-actions")]) node.replaceChildren();
   const platformView = master && page === 'clientes';
   const customer = groups.find(entry => entry.id === group);

@@ -119,9 +119,12 @@ h2{font-size:24px}h3{font-size:18.72px}
 dialog{width:calc(100% - 24px);max-height:85vh;max-height:85dvh;padding:14px;overflow:auto}
 input,select,textarea,.sidebar select{font-size:16px}
 }
+.content[style*="--page-"] #view{font-family:var(--page-font,inherit);font-size:var(--page-size,inherit);text-align:var(--page-align,start);max-width:var(--page-width,100%)}
+.content[style*="--page-"] #view .panel{padding:var(--page-padding,16px)}
+.content[style*="--page-"] h1,.content[style*="--page-"] #view h2{font-size:var(--page-title,24px);font-family:var(--page-font,Manrope)}
 </style>
 <script defer src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<script id="app-entry" type="module" src="./app.mjs?v=20261121-30"></script>
+<script id="app-entry" type="module" src="./app.mjs?v=20261121-31"></script>
 </head>
 <body>
 <div id="version-notice" hidden style="padding:10px 18px;background:#f6e8d0">
