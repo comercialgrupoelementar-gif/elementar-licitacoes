@@ -581,7 +581,32 @@ function renderClients(view) {
     await call('licitacoes_criar_cliente',values);
     clients = await call('licitacoes_clientes');
   }), section,true);
-  for (const customer of clients) panel(section,'<strong>'+escape(customer.nome)+'</strong><p>'+escape(customer.integrantes)+' integrante(s)</p>');
+  for (const customer of clients) {
+    const card=panel(section,'<strong>'+escape(customer.nome)+'</strong><p>'+escape(customer.integrantes)+' integrante(s)</p>');
+    const members=panel(card,'<h3>Permissões por conta</h3>');
+    action('Consultar integrantes',()=>{
+      showMemberProfiles(members,customer.id).catch(error=>message(error.message));
+    },card);
+  }
+}
+
+async function showMemberProfiles(section,customerId) {
+  const members=await call('licitacoes_equipe',{cliente:customerId});
+  if(!section.isConnected) return;
+  section.replaceChildren();
+  renderMemberProfiles(section,customerId,members,()=>showMemberProfiles(section,customerId).catch(error=>message(error.message)));
+}
+
+function renderMemberProfiles(section,customerId,members,refresh) {
+  for(const member of members) {
+    const card=panel(section,'<strong>'+escape(member.email)+'</strong><p>'+({admin:'Administrador',operador:'Operador',leitor:'Leitor'}[member.papel]??'')+'</p>');
+    if(!['operador','leitor'].includes(member.papel)) continue;
+    action('Alterar perfil',()=>edit('Permissões da conta '+member.email,[
+      ['novo_perfil','Perfil','select',member.papel,[['operador','Operador'],['leitor','Leitor']]]
+    ],async values=>{
+      await call('licitacoes_alterar_perfil',{cliente:customerId,integrante:member.usuario_id,...values});
+    },{onSaved:refresh}),card);
+  }
 }
 
 function renderTeam(view) {
@@ -593,7 +618,7 @@ function renderTeam(view) {
     await call('licitacoes_adicionar_membro',{...values,cliente:group});
     team = await call('licitacoes_equipe',{cliente:group});
   }),section,true);
-  for (const member of team) panel(section,'<strong>'+escape(member.email)+'</strong><p>'+escape(member.papel)+'</p>');
+  renderMemberProfiles(section,group,team,()=>openTeam());
 }
 
 function renderEditalIndex(view, docs) {
