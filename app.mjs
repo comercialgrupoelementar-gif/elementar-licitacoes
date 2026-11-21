@@ -768,11 +768,115 @@ async function postSupportMessage(ticket, text, file) {
   if(error) throw error;
 }
 
+let notificationTicket;
+function mountNotifications(account) {
+  if (!master && !group) return;
+  const area=document.createElement('details');
+  area.className='notification-menu';
+  area.innerHTML='<summary aria-label="Notificações"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9m-11 12a2 2 0 0 0 4 0"/></svg><span class="notification-badge" hidden></span></summary><section class="notification-panel" aria-label="Lista de notificações"><div class="notification-heading"><strong>Notificações</strong></div><div class="notification-items" aria-live="polite"></div></section>';
+  account.prepend(area);
+  const list=area.querySelector('.notification-items');
+  const badge=area.querySelector('.notification-badge');
+  const summary=area.querySelector('summary');
+  const owner=session.user.id;
+  const scope=group;
+  const global=master;
+  let events=[];
+  let read=new Set();
+  let busy=false;
+  let loaded=false;
+  const markAll=action('Marcar todas como lidas',()=>mark(events.filter(event=>!read.has(event.key))),area.querySelector('.notification-heading'));
+  markAll.hidden=true;
+  area.addEventListener('toggle',()=>{if(area.open) refresh();});
+  area.addEventListener('keydown',event=>{
+    if(event.key==='Escape' && area.open) {area.open=false;summary.focus();}
+  });
+  const timer=setInterval(()=>{
+    if(!area.isConnected) {clearInterval(timer);return;}
+    if(!document.hidden) refresh();
+  },20000);
+  refresh();
+
+  async function refresh() {
+    if(busy) return;
+    busy=true;
+    if(area.open && !loaded) list.textContent='Carregando notificações…';
+    try {
+      let tickets=client.from('chamados_clientes').select('id,assunto,criado_em,situacao,atualizado_em');
+      let messages=client.from('chamado_mensagens').select('id,enviada_em,suporte,chamados_clientes!inner(id,assunto,grupo_id)').neq('autor_id',owner).eq('suporte',!global);
+      if(!global) {
+        tickets=tickets.eq('grupo_id',scope).eq('situacao','Resolvido').not('atualizado_em','is',null);
+        messages=messages.eq('chamados_clientes.grupo_id',scope);
+      }
+      const [ticketResult,messageResult]=await Promise.all([
+        tickets.order(global?'criado_em':'atualizado_em',{ascending:false}).limit(50),
+        messages.order('enviada_em',{ascending:false}).limit(50)
+      ]);
+      if(ticketResult.error || messageResult.error) throw ticketResult.error || messageResult.error;
+      const incoming=[
+        ...ticketResult.data.map(ticket=>({key:(global?'chamado:':'solucao:')+ticket.id,ticket:ticket.id,title:global?'Novo chamado':'Chamado resolvido',subject:ticket.assunto,date:global?ticket.criado_em:ticket.atualizado_em})),
+        ...messageResult.data.map(entry=>({key:'mensagem:'+entry.id,ticket:entry.chamados_clientes.id,title:global?'Mensagem da empresa':'Mensagem do suporte',subject:entry.chamados_clientes.assunto,date:entry.enviada_em}))
+      ].sort((a,b)=>b.date.localeCompare(a.date)).slice(0,50);
+      if(!area.isConnected) return;
+      let saved=[];
+      if(incoming.length) {
+        const result=await client.from('notificacoes_lidas').select('evento').in('evento',incoming.map(event=>event.key));
+        if(result.error) throw result.error;
+        saved=result.data;
+      }
+      if(!area.isConnected) return;
+      const changed=!loaded || JSON.stringify(incoming)!==JSON.stringify(events) || saved.map(row=>row.evento).sort().join()!==[...read].sort().join();
+      events=incoming;
+      read=new Set(saved.map(row=>row.evento));
+      loaded=true;
+      if(changed) draw();
+    } catch(error) {
+      if(!loaded && area.isConnected) list.textContent='Não foi possível carregar as notificações.';
+    } finally {busy=false;}
+  }
+
+  async function mark(items) {
+    const unread=items.filter(event=>!read.has(event.key));
+    if(!unread.length) return;
+    const {error}=await client.from('notificacoes_lidas').upsert(unread.map(event=>({evento:event.key})),{onConflict:'usuario_id,evento',ignoreDuplicates:true});
+    if(error) throw new Error('Não foi possível marcar a notificação como lida.');
+    for(const event of unread) read.add(event.key);
+    draw();
+  }
+
+  function draw() {
+    const count=events.filter(event=>!read.has(event.key)).length;
+    badge.hidden=!count;
+    badge.textContent=String(count);
+    summary.setAttribute('aria-label',count?'Notificações, '+count+' não lidas':'Notificações');
+    markAll.hidden=!count;
+    list.replaceChildren();
+    if(!events.length) list.textContent='Nenhuma notificação.';
+    for(const event of events) {
+      const button=action('',async ()=>{
+        await mark([event]);
+        notificationTicket=event.ticket;
+        area.open=false;
+        if(global) await openMasterPage('masterSuporte');
+        else goTo('ajuda');
+      },list);
+      button.className='notification-event';
+      if(!read.has(event.key)) button.dataset.unread='';
+      for(const [tag,value] of [['strong',event.title],['span',event.subject],['small',supportDate(event.date)]]) {
+        const field=document.createElement(tag);
+        field.textContent=value;
+        button.append(field);
+      }
+    }
+  }
+}
+
 function renderCustomerTickets(view, attending=false) {
   const section=panel(view,attending?'<h2>Fila de chamados das empresas</h2>':'<h2>Chamados da empresa</h2>');
   const list=document.createElement('div');
   const conversation=document.createElement('div');
-  let selectedId;
+  let selectedId=notificationTicket;
+  notificationTicket=undefined;
 
   if (!attending) action('Abrir chamado',()=>edit('Abrir chamado',[
     ['contato_nome','Nome','text'],['contato_email','E-mail','email',session.user.email],
@@ -2202,6 +2306,7 @@ function render() {
       if (error) throw error;
       session = null; group = null; master = false; groups = []; clients = []; team = []; page = 'painel'; activeEdital = null; await load(); render();
     },account);
+    mountNotifications(account);
     signout.className = 'signout';
     signout.setAttribute('aria-label','Sair');
     signout.title = 'Sair';
