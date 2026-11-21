@@ -935,7 +935,7 @@ function renderMasterPage(view) {
     return;
   }
   if(page==='masterAuditoria') {
-    const labels={gestao_comercial:'Financeiro, assinaturas e suporte',interesses_comerciais:'Solicitações comerciais',aparencia_telas:'Aparência',chamados_clientes:'Atendimento de chamados'};
+    const labels={gestao_comercial:'Financeiro, assinaturas e suporte',interesses_comerciais:'Solicitações comerciais',aparencia_telas:'Aparência',chamados_clientes:'Atendimento de chamados',grupos:'Acesso da empresa',membros:'Acesso e alias do usuário'};
     renderMasterRecords(view,'auditoria_plataforma','ocorrido_em,usuario_id,recurso,acao,registro',100,(section,row)=>{
       panel(section,'<strong>'+escape(labels[row.recurso]??row.recurso)+'</strong><p>'+
         (row.acao==='INSERT'?'Cadastro':'Alteração')+' · '+escape(new Date(row.ocorrido_em).toLocaleString('pt-BR'))+
@@ -951,6 +951,33 @@ function renderMasterPage(view) {
   },section,true);
 }
 
+async function openAccessConfiguration(parent,company,byUser) {
+  const settings=await call('licitacoes_configuracao_acesso',{empresa:company.id});
+  if (!byUser) {
+    edit('Acesso da empresa · '+company.nome,[
+      ['modo','Situação','select',settings.modo,[['ativo','Ativo'],['leitura','Somente leitura'],['bloqueado','Bloqueado']]],
+      ['validade','Válido até (opcional)','date',settings.validade]
+    ],values=>call('licitacoes_salvar_acesso',{empresa:company.id,modo:values.modo,validade:values.validade||null}));
+    return;
+  }
+  if(!parent.isConnected) return;
+  parent.replaceChildren();
+  for(const member of settings.usuarios) {
+    const card=panel(parent,'<strong>'+escape(member.alias||member.email)+'</strong><p>'+
+      escape(member.email)+' · '+escape(member.papel)+' · '+(member.habilitado?'Habilitado':'Bloqueado')+
+      (member.validade?' · Válido até '+escape(member.validade.split('-').reverse().join('/')):'')+'</p>');
+    action('Configurar acesso e alias',()=>edit('Acesso de '+member.email,[
+      ['modo','Situação','select',member.habilitado?'ativo':'bloqueado',[['ativo','Ativo'],['bloqueado','Bloqueado']]],
+      ['validade','Válido até (opcional)','date',member.validade],
+      ['apelido','Alias na empresa','text',member.alias]
+    ],values=>call('licitacoes_salvar_acesso',{empresa:company.id,integrante:member.id,modo:values.modo,
+      validade:values.validade||null,apelido:values.apelido}),{
+      decorate:form=>{form.elements.apelido.required=false;form.elements.apelido.maxLength=80;},
+      onSaved:()=>openAccessConfiguration(parent,company,true).catch(error=>message(error.message))
+    }),card);
+  }
+}
+
 function renderClients(view) {
   const section = panel(view,'<h2>Empresas cadastradas</h2>');
   if(page==='masterEmpresas') action('Cadastrar empresa cliente', () => edit('Nova empresa cliente', [
@@ -961,6 +988,7 @@ function renderClients(view) {
   }), section,true);
   for (const customer of clients) {
     const card=panel(section,'<strong>'+escape(customer.nome)+'</strong><p>'+escape(customer.integrantes)+' integrante(s)</p>');
+    if(page==='masterEmpresas') action('Controlar acesso da empresa',()=>openAccessConfiguration(card,customer,false),card);
     if(page==='masterAparencia') action('Configurar aparência',()=>{
       const existing=card.querySelector('[data-aparencia]');
       if(existing) {existing.remove();return;}
@@ -972,6 +1000,8 @@ function renderClients(view) {
     if(page==='masterAcessos') {
       const members=panel(card,'<h3>Permissões por conta</h3>');
       action('Consultar integrantes',()=>showMemberProfiles(members,customer.id),card);
+      const permissions=panel(card,'<h3>Acesso e aliases</h3>');
+      action('Configurar acesso dos usuários',()=>openAccessConfiguration(permissions,customer,true),card);
     }
   }
 }
@@ -1875,6 +1905,25 @@ function renderReadyProposals(view) {
 }
 
 const iconPaths = {
+  cotacoes:'M3 3h7v18H3z M14 3h7v18h-7z M5 8h3m-3 4h3m8-4h3m-3 4h3',
+  orcamento:'M5 3h14v18l-3-2-4 2-4-2-3 2z M8 8h8m-8 4h5',
+  propostaPronta:'M5 3h10l4 4v14H5z M9 14l2 2 5-5',
+  disputa:'M5 5l14 14M4 9V4h5m6 0h5v5M5 19l14-14m-4 15h5v-5M4 15v5h5',
+  acompanhamento:'M12 2v3m0 14v3M2 12h3m14 0h3M5 12a7 7 0 1014 0 7 7 0 10-14 0m7-4v4l3 2',
+  finalizados:'M3 4h18v4H3z M5 8v12h14V8m-10 4h6',
+  logistica:'M2 6h12v11H2z M14 10h4l4 4v3h-8m-8 0a2 2 0 104 0m6 0a2 2 0 104 0',
+  financeiro:'M3 6h18v12H3z m0 4h18M7 15h3m5 0h2',
+  aplicativo:'M7 2h10a2 2 0 012 2v16a2 2 0 01-2 2H7a2 2 0 01-2-2V4a2 2 0 012-2zm4 16h2',
+  masterEmpresas:'M3 21V3h12v18m0-11h6v11M1 21h22M7 7h4m-4 4h4m-4 4h4',
+  masterAcessos:'M3 21v-2a4 4 0 014-4h4a4 4 0 014 4v2M9 12a4 4 0 100-8 4 4 0 000 8zm9 0l2 2 3-4',
+  masterAssinaturas:'M5 3h14v18H5z M8 8h8m-8 4h8m-8 5h4',
+  masterFinanceiro:'M3 5h17v15H3z M3 8h17m-6 4h7v5h-7z',
+  masterComercial:'M3 4h18v15H3z M3 6l9 7 9-7',
+  masterSuporte:'M4 13v-2a8 8 0 0116 0v2M4 12H2v6h4v-6zm16 0h2v6h-4v-6zm0 6v2h-6',
+  masterAparencia:'M3 4h18v16H3z M3 8h18m-12 0v12m3-8h6m-6 4h4',
+  masterAuditoria:'M5 3h14v18H5z m3 5h8m-8 4h8m-8 4h4',
+  masterVersoes:'M4 12a8 8 0 0114-5l2 3m0-6v6h-6m6 2a8 8 0 01-14 5l-2-3m0 6v-6h6',
+
   painel:'M3 10l9-7 9 7v10h-6v-6H9v6H3z', editais:'M3 4h18v16H3z M9 4v12 M15 4v9',
   propostas:'M5 3h10l4 4v14H5z M8 12h8 M8 16h8',
   documentacao:'M3 7h7l2 2h9v11H3z M9 14l2 2 4-4',
@@ -2138,7 +2187,7 @@ function render() {
     return;
   }
   if (client) {
-    const user = session.user.user_metadata?.username || session.user.email?.split('@')[0] || 'Meu acesso';
+    const user = customer?.alias || session.user.user_metadata?.username || session.user.email?.split('@')[0] || 'Meu acesso';
     const profile = master ? 'Mestre Criador' : ({admin:'Administrador',operador:'Operador',leitor:'Leitor'}[groupRole()] || 'Usuário');
     account.innerHTML = `<span class="avatar" aria-hidden="true">${escape(user.slice(0,2).toUpperCase())}</span><div><strong>${escape(user)}</strong><small>${profile}</small></div>`;
     const signout = action('Sair', async () => {
@@ -2156,7 +2205,7 @@ function render() {
     }
     if (platformView) { renderMasterPage(view); if (!groups.length) return; }
     if (!groups.length) {
-      panel(view,'<p>Seu usuário ainda está sem vínculo com uma empresa.</p>');
+      panel(view,'<p>Nenhum espaço de trabalho disponível para esta conta. Consulte o administrador sobre vínculo, bloqueio ou validade.</p>');
       return;
     }
 
@@ -2645,9 +2694,9 @@ function renderProposal(view,row) {
 }
 
 async function loadGroups(){
-  const {data,error}=await client.from('membros').select('papel,grupos(id,nome)');
+  const {data,error}=await client.from('membros').select('papel,alias_empresa,grupos(id,nome,acesso_modo)');
   if(error) throw error;
-  groups=data.map(m=>({...m.grupos,role:m.papel}));
+  groups=data.filter(m=>m.grupos).map(m=>({...m.grupos,role:m.grupos.acesso_modo==='leitura'?'leitor':m.papel,alias:m.alias_empresa}));
   const capability = await client.rpc('licitacoes_eh_mestre');
   if (capability.error && capability.error.code !== 'PGRST202') throw capability.error;
   master = capability.data === true;

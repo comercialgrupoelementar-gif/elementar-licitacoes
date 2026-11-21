@@ -35,20 +35,14 @@ begin
  ('public.mover_proposta(uuid,smallint,smallint)', 'where e.id=p_edital', 'where e.id=p_edital and public.licitacoes_acesso_empresa(e.grupo_id,true)'),
  ('public.anexar_proposta_assinada(uuid,text)', 'where e.id=p_edital', 'where e.id=p_edital and public.licitacoes_acesso_empresa(e.grupo_id,true)'),
  ('public.aplicar_custo_cotado(uuid,uuid,numeric,integer)', 'where c.id=p_cotacao', 'where c.id=p_cotacao and public.licitacoes_acesso_empresa(c.grupo_id,true)'),
- ('public.licitacoes_pode_gerenciar_equipe(uuid)', 'or exists (', 'or (public.licitacoes_acesso_empresa(cliente,true) and exists ('),
+ ('public.licitacoes_pode_gerenciar_equipe(uuid)', 'm.grupo_id=cliente', 'm.grupo_id=cliente and public.licitacoes_acesso_empresa(cliente,true)'),
  ('public.licitacoes_adicionar_membro(uuid,text,text)', 'm.grupo_id=cliente and m.usuario_id=auth.uid()', 'm.grupo_id=cliente and public.licitacoes_acesso_empresa(cliente,true) and m.usuario_id=auth.uid()'),
- ('public.licitacoes_acessa_chamado(uuid)', 'public.licitacoes_eh_mestre() or exists (', 'public.licitacoes_eh_mestre() or (public.licitacoes_acesso_empresa(c.grupo_id,false) and exists (')
+ ('public.licitacoes_acessa_chamado(uuid)', 'm.grupo_id=c.grupo_id', 'm.grupo_id=c.grupo_id and public.licitacoes_acesso_empresa(c.grupo_id,false)')
  ) regras(assinatura,busca,substituta)
  loop
   original:=pg_catalog.pg_get_functiondef(to_regprocedure(alvo.assinatura));
   ddl:=replace(original,alvo.busca,alvo.substituta);
   if ddl is null or ddl=original then raise exception 'Função incompatível: %',alvo.assinatura; end if;
-  if alvo.assinatura like '%gerenciar_equipe%' then ddl:=replace(ddl,E'
- )',E'
- ))'); end if;
-  if alvo.assinatura like '%acessa_chamado%' then ddl:=replace(ddl,E'
-   )',E'
-   ))'); end if;
   execute ddl;
  end loop;
 end;
