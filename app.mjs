@@ -568,9 +568,10 @@ async function call(name, args) {
   return data;
 }
 
-async function openClients() {
-  [clients] = await Promise.all([call('licitacoes_clientes'),loadCommercialRecords()]);
-  page = 'clientes'; activeEdital = null; render();
+async function openClients(key='clientes') {
+  if (['clientes','masterAssinaturas','masterFinanceiro','masterSuporte'].includes(key)) await loadCommercialRecords();
+  if (['clientes','masterEmpresas','masterAcessos','masterAparencia','masterAssinaturas','masterFinanceiro','masterSuporte'].includes(key)) clients = await call('licitacoes_clientes');
+  page = key; activeEdital = null; render();
 }
 
 async function openTeam() {
@@ -672,10 +673,11 @@ function editCommercialRecord(type, record = {}) {
   });
 }
 
-function renderCommercialDashboard(view) {
+function renderCommercialDashboard(view,selectedType) {
   const today = new Intl.DateTimeFormat('sv-SE',{timeZone:'America/Sao_Paulo'}).format(new Date());
   const money = new Intl.NumberFormat('pt-BR',{style:'currency',currency:'BRL',minimumFractionDigits:4});
   const pending = commercialRecords.filter(entry => entry.tipo === 'cobranca' && entry.situacao === 'Pendente');
+  if (!selectedType) {
   const summary = panel(view,'<h2>Operação da plataforma</h2>');
   const indicators = document.createElement('div');
   indicators.className = 'line';
@@ -687,7 +689,10 @@ function renderCommercialDashboard(view) {
     ['A receber',money.format(pending.reduce((sum,entry) => sum + Number(entry.valor),0))],
     ['Chamados pendentes',commercialRecords.filter(entry => entry.tipo === 'suporte' && entry.situacao !== 'Resolvido').length]
   ]) panel(indicators,'<strong>'+title+'</strong><p>'+value+'</p>');
+  return;
+  }
   for (const [type,[title,label]] of Object.entries(commercialSections)) {
+    if (type!==selectedType) continue;
     const section = panel(view,'<h2>'+title+'</h2>');
     action(label,()=>editCommercialRecord(type),section,true);
     const rows = commercialRecords.filter(entry => entry.tipo === type);
@@ -702,10 +707,78 @@ function renderCommercialDashboard(view) {
   }
 }
 
+const masterPages = {
+  clientes:'Visão da plataforma',
+  masterEmpresas:'Empresas clientes',
+  masterAcessos:'Usuários e permissões',
+  masterAssinaturas:'Assinaturas',
+  masterFinanceiro:'Financeiro comercial',
+  masterComercial:'Solicitações comerciais',
+  masterSuporte:'Suporte interno',
+  masterAparencia:'Aparência por tela',
+  masterAuditoria:'Auditoria administrativa',
+  masterVersoes:'Versão do sistema'
+};
+
+async function openMasterPage(key) {
+  await openClients(key);
+}
+
+function renderMasterRecords(view, table, columns, limit, prepare) {
+  const section=panel(view,'<p role="status">Carregando registros…</p>');
+  client.from(table).select(columns).order(table==='interesses_comerciais'?'criado_em':'ocorrido_em',{ascending:false})
+    .limit(limit).then(({data,error})=>{
+      if (!section.isConnected) return;
+      section.replaceChildren();
+      if (error) { section.textContent=error.message; return; }
+      if (!data.length) section.textContent='Nenhum registro encontrado.';
+      for (const row of data) prepare(section,row);
+    }).catch(error=>{if(section.isConnected) section.textContent=error.message;});
+}
+
+function renderMasterPage(view) {
+  const commercial = {masterAssinaturas:'assinatura',masterFinanceiro:'cobranca',masterSuporte:'suporte'};
+  if (page==='clientes' || commercial[page]) {
+    renderCommercialDashboard(view,commercial[page]);
+    return;
+  }
+  if (page==='masterEmpresas' || page==='masterAcessos' || page==='masterAparencia') {
+    renderClients(view);
+    return;
+  }
+  if(page==='masterComercial') {
+    renderMasterRecords(view,'interesses_comerciais','id,nome,empresa,email,interesse,situacao,criado_em',100,(section,row)=>{
+      const card=panel(section,'<strong>'+escape(row.empresa)+'</strong><p>'+escape(row.nome)+' · '+escape(row.email)+'</p><p>'+
+        (row.interesse==='contratacao'?'Proposta comercial':'Demonstração')+' · '+escape(row.situacao)+' · '+escape(new Date(row.criado_em).toLocaleString('pt-BR'))+'</p>');
+      action('Alterar situação',()=>edit('Situação da solicitação',[
+        ['situacao','Situação','select',row.situacao,['Novo','Em contato','Convertido','Encerrado']]
+      ],async values=>{
+        const {error}=await client.from('interesses_comerciais').update(values).eq('id',row.id).select('id').single();
+        if(error) throw error;
+      }),card);
+    });
+    return;
+  }
+  if(page==='masterAuditoria') {
+    const labels={gestao_comercial:'Financeiro, assinaturas e suporte',interesses_comerciais:'Solicitações comerciais',aparencia_telas:'Aparência'};
+    renderMasterRecords(view,'auditoria_plataforma','ocorrido_em,usuario_id,recurso,acao,registro',100,(section,row)=>{
+      panel(section,'<strong>'+escape(labels[row.recurso]??row.recurso)+'</strong><p>'+
+        (row.acao==='INSERT'?'Cadastro':'Alteração')+' · '+escape(new Date(row.ocorrido_em).toLocaleString('pt-BR'))+
+        '</p><small>Usuário '+escape(row.usuario_id??'Sistema')+' · Registro '+escape(row.registro)+'</small>');
+    });
+    return;
+  }
+  const currentVersion=new URL(import.meta.url).searchParams.get('v') ?? 'indisponível';
+  const section=panel(view,'<h2>Versão carregada</h2><p>'+escape(currentVersion)+'</p><p role="status"></p>');
+  action('Verificar atualização',async ()=>{
+    await checkVersion();
+    section.querySelector('[role=status]').textContent=availableVersion?'Versão disponível: '+availableVersion:'Nenhuma versão mais recente foi detectada.';
+  },section,true);
+}
+
 function renderClients(view) {
-  renderCommercialDashboard(view);
-  const section = panel(view,'<h2>Mestre Gerenciador</h2><p>Cadastre empresas clientes e defina o administrador de cada espaço.</p>');
-  action('Cadastrar empresa cliente', () => edit('Nova empresa cliente', [
+  const section = panel(view,'<h2>Empresas cadastradas</h2>');
+  if(page==='masterEmpresas') action('Cadastrar empresa cliente', () => edit('Nova empresa cliente', [
     ['nome_cliente','Nome da empresa','text'],['email_admin','E-mail do administrador cadastrado','email']
   ], async values => {
     await call('licitacoes_criar_cliente',values);
@@ -713,8 +786,7 @@ function renderClients(view) {
   }), section,true);
   for (const customer of clients) {
     const card=panel(section,'<strong>'+escape(customer.nome)+'</strong><p>'+escape(customer.integrantes)+' integrante(s)</p>');
-    const members=panel(card,'<h3>Permissões por conta</h3>');
-    action('Configurar aparência',()=>{
+    if(page==='masterAparencia') action('Configurar aparência',()=>{
       const existing=card.querySelector('[data-aparencia]');
       if(existing) {existing.remove();return;}
       const settings=document.createElement('div');
@@ -722,9 +794,10 @@ function renderClients(view) {
       card.append(settings);
       renderVisualPreview(settings,customer.id);
     },card);
-    action('Consultar integrantes',()=>{
-      showMemberProfiles(members,customer.id).catch(error=>message(error.message));
-    },card);
+    if(page==='masterAcessos') {
+      const members=panel(card,'<h3>Permissões por conta</h3>');
+      action('Consultar integrantes',()=>showMemberProfiles(members,customer.id),card);
+    }
   }
 }
 
@@ -1846,9 +1919,9 @@ function render() {
   const account = byId('account');
   applyScreenAppearance(view);
   for (const node of [nav,view,account,byId("page-actions")]) node.replaceChildren();
-  const platformView = master && page === 'clientes';
+  const platformView = master && Object.hasOwn(masterPages,page);
   const customer = groups.find(entry => entry.id === group);
-  byId('page-title').textContent = platformView ? 'Administração da plataforma'
+  byId('page-title').textContent = platformView ? masterPages[page]
     : session || !client ? (page === 'equipe' ? 'Minha equipe' : page === 'relatorios' ? 'Relatórios' : screens[page] ?? 'Painel geral')
     : 'Acesso ao sistema';
   byId('connection').textContent = !client ? 'Modo demonstração · dados salvos somente neste navegador'
@@ -1865,7 +1938,7 @@ function render() {
   if (client && !session) {
     const access = document.createElement('div');
     access.className = 'auth-layout';
-    access.innerHTML = '<section class="auth-intro"><strong>E-Lementar Licitações</strong><h2>Da oportunidade à entrega.</h2><p>Organize editais, propostas e fornecimentos ao poder público.</p></section><section class="auth-access"><h2>Acesse sua empresa</h2><form id="login-form"><label>E-mail<input name="email" type="email" autocomplete="username" required></label><label>Senha<input name="password" type="password" autocomplete="current-password" required></label><button type="submit" class="primary">Entrar</button><p role="alert"></p></form></section>';
+    access.innerHTML = '<section class="auth-intro"><a href="./site.html" style="color:inherit">Site da E-Lementar</a><br><strong>E-Lementar Licitações</strong><h2>Da oportunidade à entrega.</h2><p>Organize editais, propostas e fornecimentos ao poder público.</p></section><section class="auth-access"><h2>Acesse sua empresa</h2><form id="login-form"><label>E-mail<input name="email" type="email" autocomplete="username" required></label><label>Senha<input name="password" type="password" autocomplete="current-password" required></label><button type="submit" class="primary">Entrar</button><p role="alert"></p></form></section>';
     view.append(access);
     const form = byId('login-form');
     form.onsubmit = async event => {
@@ -1902,10 +1975,13 @@ function render() {
     signout.setAttribute('aria-label','Sair');
     signout.title = 'Sair';
     signout.innerHTML = icon('sair');
-    if (master) navAction('clientes','Mestre Gerenciador',openClients,nav);
+    if (master) {
+      nav.append(Object.assign(document.createElement('p'),{className:'nav-caption master-caption',textContent:'Mestre Gerenciador'}));
+      for(const [key,label] of Object.entries(masterPages)) navAction(key,label,()=>openMasterPage(key),nav);
+    }
+    if (platformView) { renderMasterPage(view); if (!groups.length) return; }
     if (!groups.length) {
-      if (page === 'clientes' && master) renderClients(view);
-      else panel(view,'<p>Seu usuário ainda está sem vínculo com uma empresa.</p>');
+      panel(view,'<p>Seu usuário ainda está sem vínculo com uma empresa.</p>');
       return;
     }
 
@@ -1926,7 +2002,7 @@ function render() {
     navAction(key,label,()=>goTo(key),nav);
   }
   if (groupRole() === 'admin') navAction('equipe','Minha equipe',openTeam,nav);
-  if (page === 'clientes' && master) { renderClients(view); return; }
+  if (platformView) return;
   if (page === 'equipe' && groupRole() === 'admin') { renderTeam(view); return; }
   if (activeEdital) { renderProposal(view,db.editais.find(x => x.id === activeEdital)); return; }
   if (page === 'acompanhamento' || page === 'finalizados') { renderFollow(view); return; }
@@ -2440,7 +2516,12 @@ try {
     const {data,error}=await client.auth.getSession();
     if(error) throw error;
     session=data.session;
-    if(session) await loadGroups();
+    const route=new URLSearchParams(location.search);
+    if(!session && !route.has('acesso') && !route.has('v')) location.replace('./site.html');
+    if(session) {
+      await loadGroups();
+      if(master) await openClients();
+    }
   } else await load();
   render();
 } catch(error) { render(); message(error.message); }
