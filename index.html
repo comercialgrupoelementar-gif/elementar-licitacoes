@@ -158,9 +158,13 @@ html{overscroll-behavior-y:none}
 .settings-section{padding:clamp(16px,3vw,27px);margin-bottom:16px}
 .settings-section>h2{margin:0 0 18px;padding-bottom:14px;border-bottom:1px solid var(--line)}
 .settings-section>.panel{margin-top:12px}
+
+.operation-fields{grid-template-columns:repeat(auto-fit,minmax(min(210px,100%),1fr));align-items:end}
+.operation-fields>div,.operation-fields>[role=status]{grid-column:1/-1}
+.process-context{overflow-wrap:anywhere;color:#525b55;font-size:12px;line-height:1.6}
 </style>
 <script defer src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<script id="app-entry" type="module" src="./app.mjs?v=20261121-39"></script>
+<script id="app-entry" type="module" src="./app.mjs?v=20261121-40"></script>
 </head>
 <body>
 <div id="version-notice" hidden style="padding:10px 18px;background:#f6e8d0">

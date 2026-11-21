@@ -212,6 +212,8 @@ function agencyFields(row = {}) {
 }
 
 async function saveAgency(values,id) {
+  const cnpj=normalizeDocument(values.cnpj);
+  if(db.orgaos_compradores.some(row=>row.id!==id && normalizeDocument(row.cnpj)===cnpj)) throw new Error('Este CNPJ já está no cadastro de órgãos. Abra o registro existente para editar.');
   for (const key of Object.keys(values)) values[key] = values[key].trim();
   values.cnpj = normalizeDocument(values.cnpj);
   if (values.cnpj.length !== 14 || !validDocument(values.cnpj)) throw new Error('Informe um CNPJ válido.');
@@ -416,7 +418,7 @@ function catalogFields(row = {}) {
     ['tipo','Tipo','select',row.tipo ?? 'Produto',['Produto','Serviço']],['unidade','Unidade de medida','text',row.unidade],
     ['marca','Marca','text',row.marca],['detalhes','Detalhes','text',row.detalhes],
     ['observacao','Observações','text',row.observacao],['custo','Custo unitário (R$)','number',row.custo],
-    ['margem','Margem sugerida (%)','number',row.margem ?? 18]
+    ['margem','Margem sugerida (%)','number',row.margem ?? operationSettings().margem]
   ];
 }
 
@@ -469,6 +471,19 @@ function renderRegistry(view, agencies) {
       const subtitle = agencies ? row.cnpj+' · '+row.municipio+'/'+row.uf
         : row.tipo+' · '+row.unidade+' · Custo '+money.format(row.custo);
       const card = panel(list,'<strong>'+escape(title)+'</strong><p>'+escape(subtitle)+'</p>');
+      if(agencies) {
+        const records=db.editais.filter(entry=>entry.orgao===row.nome);
+        if(records.length) action('Histórico de processos',()=>{
+          const history=document.createElement('ul');
+          history.className='registry-history';
+          for(const entry of records) {const item=document.createElement('li');item.textContent=entry.numero+' · '+entry.status;history.append(item);}
+          const existing=card.querySelector('.registry-history');
+          if(existing) existing.remove(); else card.append(history);
+        },card);
+      } else {
+        const costs=db.cotacoes.flatMap(quote=>(quote.itens??[]).filter(item=>item.catalogo_id===row.id&&item.aplicado_em).map(item=>({date:item.aplicado_em,source:quote.fornecedor}))).sort((x,y)=>y.date.localeCompare(x.date));
+        if(costs.length) card.insertAdjacentHTML('beforeend','<p class="muted">Última cotação aplicada: '+escape(costs[0].source)+' · '+escape(supportDate(costs[0].date))+'</p>');
+      }
       writeAction('Editar',()=>open(row),card);
       demoDelete(table,row.id,card);
     }
@@ -489,7 +504,7 @@ function item(row, previous = {}) {
     ['marca_item','Marca','text',previous.marca],
     ['embalagem','Unidades por embalagem','number',previous.embalagem ?? 1],
     ['custo_embalagem','Custo por embalagem (R$)','number',previous.custo_embalagem],
-    ['margem','Margem bruta desejada (%)','number',previous.margem ?? 18],
+    ['margem','Margem bruta desejada (%)','number',previous.margem ?? operationSettings().margem],
     ['fornecedor','Fornecedor','text',previous.fornecedor],
     ['observacao_item','Observação interna','textarea',previous.observacao]
   ], values=>save('itens',proposalItem(row,values,previous),previous.id),{decorate:form=>{
@@ -927,6 +942,12 @@ function mountNotifications(account) {
 
 function renderCustomerTickets(view, attending=false) {
   const section=panel(view,attending?'<h2>Fila de chamados das empresas</h2>':'<h2>Chamados da empresa</h2>');
+  section.insertAdjacentHTML('beforeend','<label>Buscar protocolo ou assunto<input type="search"></label>');
+  const ticketSearch=section.querySelector('input[type=search]');
+  ticketSearch.addEventListener('input',()=>{
+    const query=ticketSearch.value.trim().toLowerCase();
+    for(const card of list.children) card.hidden=!card.dataset.search.includes(query);
+  });
   const list=document.createElement('div');
   const conversation=document.createElement('div');
   let selectedId=notificationTicket;
@@ -972,6 +993,8 @@ function renderCustomerTickets(view, attending=false) {
       const company=attending ? clients.find(row=>row.id===ticket.grupo_id)?.nome : '';
       const card=panel(list,'<strong>'+supportProtocol(ticket)+' · '+escape(ticket.assunto)+'</strong><p>'+
         (company?escape(company)+' · ':'')+escape(ticket.situacao)+' · '+escape(supportDate(ticket.criado_em))+'</p>');
+      card.dataset.search=(supportProtocol(ticket)+' '+ticket.assunto).toLowerCase();
+      card.hidden=!card.dataset.search.includes(ticketSearch.value.trim().toLowerCase());
       action('Abrir conversa',()=>{selectedId=ticket.id;return showConversation(ticket);},card);
     }
     const selected=data.find(ticket=>ticket.id===selectedId);
@@ -1206,10 +1229,10 @@ function renderMemberProfiles(section,customerId,members,refresh) {
 function renderTeam(view) {
   const section=panel(view,'<h2>Integrantes</h2><p class="muted">Vincule contas cadastradas à empresa e defina seus cargos.</p>');
   section.classList.add('settings-section');
-  action('Adicionar integrante',async ()=>{
+  action('Vincular integrante',async ()=>{
     const state=await call('licitacoes_painel_cargos',{empresa:group});
     const options=[['base','Sem cargo personalizado'],...state.cargos.map(cargo=>[cargo.id,cargo.nome])];
-    edit('Adicionar integrante',[
+    edit('Vincular integrante',[
       ['nome_usuario','Nome de exibição','text'],
       ['email_membro','E-mail da conta cadastrada','email'],
       ['papel_membro','Perfil básico','select','operador',[['operador','Operador'],['leitor','Leitor']]],
@@ -1233,12 +1256,62 @@ function renderTeam(view) {
   mountCargoManagement(view,group);
 }
 
+const operationDefaults={antecedencia:7,margem:18};
+function operationSettings() {
+  return {...operationDefaults,...screenAppearance.find(row=>row.tela==='preferenciasOperacionais')?.ajustes};
+}
+function renderOperationSettings(section) {
+  const form=document.createElement('form');
+  form.className='operation-fields';
+  form.innerHTML='<label>Dias de antecedência no painel<input name="antecedencia" type="number" min="0" max="90" step="1" required></label><label>Margem inicial para novos itens (%)<input name="margem" type="number" min="0" max="99.99" step="0.01" required></label><div><button class="primary">Salvar padrões</button></div><p role="status"></p>';
+  const settings=operationSettings();
+  form.elements.antecedencia.value=settings.antecedencia;
+  form.elements.margem.value=settings.margem;
+  section.append(form);
+  form.onsubmit=async event=>{
+    event.preventDefault();
+    event.submitter.disabled=true;
+    const status=form.querySelector('[role=status]');
+    try {
+      const ajustes={antecedencia:form.elements.antecedencia.valueAsNumber,margem:form.elements.margem.valueAsNumber,salvoEm:new Date().toISOString()};
+      const {error}=await client.from('aparencia_telas').upsert({grupo_id:group,tela:'preferenciasOperacionais',ajustes});
+      if(error) throw error;
+      await load();
+      status.textContent='Padrões salvos em '+supportDate(ajustes.salvoEm)+'.';
+    } catch(error) {status.textContent=error.message;}
+    finally {event.submitter.disabled=false;}
+  };
+  if(settings.salvoEm) form.querySelector('[role=status]').textContent='Última alteração em '+supportDate(settings.salvoEm)+'.';
+}
+
+function processSummary(parent,row,next) {
+  const summary=document.createElement('p');
+  summary.className='process-context';
+  summary.textContent=[row.numero && 'Processo '+row.numero,row.numero_pregao && 'Pregão '+row.numero_pregao,
+    row.sessao && 'Sessão '+row.sessao.split('-').reverse().join('/'),next].filter(Boolean).join(' · ');
+  parent.append(summary);
+}
+function renderUpcoming(view) {
+  const section=panel(view,'<h2>Prazos e pendências</h2>');
+  section.classList.add('settings-section');
+  const today=new Intl.DateTimeFormat('sv-SE',{timeZone:'America/Sao_Paulo'}).format(new Date());
+  const end=new Date(today+'T12:00:00Z');
+  end.setUTCDate(end.getUTCDate()+Number(operationSettings().antecedencia));
+  const rows=db.editais.filter(row=>row.sessao && row.sessao>=today && row.sessao<=end.toISOString().slice(0,10)
+    && row.status!=='Reprovado' && !db.disputas.some(d=>d.edital_id===row.id && d.etapa===2)).sort((a,b)=>a.sessao.localeCompare(b.sessao));
+  for(const row of rows) {
+    const card=panel(section,'<strong>'+escape(row.orgao)+'</strong>');
+    processSummary(card,row,row.status==='Aprovado'?proposalStages[proposalStage(row)]:row.status);
+    if(row.status==='Aprovado' && screenAllowed('propostas')) action('Abrir proposta',()=>{page='propostas';openWorkflowProposal(row);},card);
+    else if(screenAllowed('editais')) action('Abrir captação',()=>goTo('editais'),card);
+  }
+  if(!rows.length) section.append('Nenhuma sessão no período configurado.');
+}
+
 const settingsCategories=[
-  ['Empresa e documentos',['configuracoes','documentacao']],
-  ['Captação e propostas',['editais','propostas','propostaPronta','disputa']],
-  ['Operação e entregas',['orgaos','catalogo','acompanhamento','finalizados','logistica']],
-  ['Compras e financeiro',['cotacoes','orcamento','financeiro']],
-  ['Aparência e navegação',['painel','aplicativo','ajuda']]
+  ['Empresa e documentos',[]],
+  ['Padrões operacionais',[]],
+  ['Aparência e navegação',Object.keys(screens)]
 ];
 let selectedSettings=0;
 
@@ -1267,7 +1340,8 @@ function renderCompanySettings(view) {
         writeAction('Logo e dados para propostas',()=>companyProposalSettings(companyRecord),card);
       }
     }
-    if(client && canWrite()) renderVisualPreview(section,group,modules);
+    if(client && canWrite() && index===1) renderOperationSettings(section);
+    if(client && canWrite() && index===2) renderVisualPreview(section,group,modules);
   }
 }
 
@@ -1629,7 +1703,7 @@ function renderFinancialPrices(view) {
 
 function renderQuoteFinance(view) {
   renderFinancialPrices(view);
-  const section=panel(view,'<h2>Preços recebidos de fornecedores</h2><p>Compare o preço recebido com o custo do catálogo antes de aplicar.</p>');
+  const section=panel(view,'<h2>Custos e preços de fornecedores</h2><p>Compare o preço recebido com o custo do catálogo antes de aplicar.</p>');
   const received=db.cotacoes.filter(row=>!isBudget(row) && row.etapa===2).flatMap(row=>row.itens.filter(item=>item.preco!=null).map(item=>({row,item})));
   if (!received.length) { section.append('Nenhum preço recebido registrado em cotações enviadas.'); return; }
   const table=quoteTable(section,['Cotação e fornecedor','Produto ou serviço','Custo atual','Preço recebido','Diferença','Ação']);
@@ -2031,11 +2105,21 @@ function renderFollow(view) {
   }
   const archived=page==='finalizados';
   const rows=db.editais.filter(row=>db.disputas.some(d=>d.edital_id===row.id && d.etapa===2) && !!getFollow(row)?.finalizado_em===archived);
-  if(!rows.length) panel(view,archived?'<p>Nenhum processo finalizado.</p>':'<p>Nenhum processo recebido da disputa.</p>');
-  for(const row of rows) {
-    const card=panel(view,'<h3>'+escape(row.numero)+'</h3><p>'+escape(row.orgao)+'</p>');
+  const filter=archived?panel(view,'<label>Buscar pelo número do processo<input type="search"></label>').querySelector('input'):null;
+  const result=document.createElement('div');
+  view.append(result);
+  function draw() {
+  result.replaceChildren();
+  const matches=filter?rows.filter(row=>row.numero.toLowerCase().includes(filter.value.trim().toLowerCase())):rows;
+  if(!matches.length) panel(result,archived?'<p>Nenhum processo finalizado.</p>':'<p>Nenhum processo recebido da disputa.</p>');
+  for(const row of matches) {
+    const card=panel(result,'<h3>'+escape(row.numero)+'</h3><p>'+escape(row.orgao)+'</p>');
+    processSummary(card,row,archived?'Arquivado em '+supportDate(getFollow(row).finalizado_em):'Próxima ação: conferir o resultado e os documentos');
     action(archived?'Consultar processo':'Abrir acompanhamento',()=>openFollow(view,row),card);
   }
+  }
+  if(filter) filter.oninput=draw;
+  draw();
 }
 
 function renderDisputes(view) {
@@ -2093,6 +2177,7 @@ function renderProposalBoard(view) {
     }
     for (const row of rows) {
       const card = panel(lane,'<strong>'+escape(row.numero)+'</strong><p>'+escape(row.orgao)+'</p><p>'+money.format(total(db.itens.filter(item=>item.edital_id===row.id)))+'</p>');
+      processSummary(card,row,db.itens.some(item=>item.edital_id===row.id)?'Próxima ação: '+stage:'Pendência: adicionar itens');
       card.classList.add('card');
       card.draggable = Boolean(client && canWrite());
       card.ondragstart = event=>event.dataTransfer.setData('text/plain',row.id);
@@ -2115,7 +2200,8 @@ function renderReadyProposals(view) {
   if (!rows.length) section.append('Nenhuma proposta nesta etapa.');
   for (const row of rows) {
     const card = panel(section,'<strong>'+escape(row.numero)+'</strong><p>'+escape(row.orgao)+'</p>');
-    action('Abrir proposta e baixar ZIP',()=>openWorkflowProposal(row),card);
+    processSummary(card,row,db.itens.filter(item=>item.edital_id===row.id).length+' itens na proposta');
+    action('Conferir proposta e arquivos',()=>openWorkflowProposal(row),card);
   }
 }
 
@@ -2169,6 +2255,7 @@ function navAction(key,label,run,parent) {
   button.setAttribute('aria-current',String(key === page || (key === 'painel' && page === 'relatorios')));
 }
 function renderOverview(view) {
+  renderUpcoming(view);
   const yearNow=new Intl.DateTimeFormat('pt-BR',{year:'numeric',timeZone:'America/Sao_Paulo'}).format(new Date());
   const yearOf=row=>row.sessao?.slice(0,4) || row.numero?.match(/(?:^|[^0-9])((?:19|20)[0-9]{2})(?![0-9])/)?.[1] || '';
   const years=[...new Set([yearNow,...db.editais.map(yearOf),...db.cotacoes.map(row=>row.criado_em?.slice(0,4))].filter(Boolean))].sort().reverse();
@@ -2468,6 +2555,11 @@ function render() {
   if (page === 'relatorios') { renderReports(view); return; }
   if (page === 'orgaos' || page === 'catalogo') { renderRegistry(view,page === 'orgaos'); return; }
   if (page === 'ajuda') { if(client && group && !master) renderCustomerTickets(view); renderHelp(view); return; }
+  if(page==='aplicativo') {
+    const installed=matchMedia('(display-mode: standalone)').matches || navigator.standalone===true;
+    panel(view,'<h2>Aplicativo</h2><p>Versão '+escape(new URL(import.meta.url).searchParams.get('v'))+'</p><p>'+ (installed?'Aberto como aplicativo.':'Aberto no navegador. Use o menu do navegador para instalar, quando disponível.')+'</p><p>Os dados da empresa dependem de conexão com o sistema.</p>');
+    return;
+  }
   if (Object.hasOwn(pendingScreens,page)) {
     panel(view,'<h2>Em implantação</h2><p>'+escape(pendingScreens[page])+'</p>');
     return;
@@ -2890,6 +2982,7 @@ function renderProposal(view,row) {
   
   const section = panel(view,'<h2>Proposta · '+escape(row.numero)+'</h2><p>'+escape(row.orgao)+' · '+escape(db.empresas.find(e=>e.id===row.empresa_id)?.nome)+'</p><p>Total estimado <strong>'+money.format(total(rows))+'</strong></p>');
   section.insertAdjacentHTML('beforeend','<p>Etapa: <strong>'+proposalStages[proposalStage(row)]+'</strong></p>');
+  processSummary(section,row,rows.length?'Próxima ação: '+proposalStages[proposalStage(row)]:'Pendência: adicionar itens à proposta');
   proposalControls(section,row);
   if (proposalStage(row)>=4 && client) renderProposalSignature(view,row).catch(error=>message(error.message));
   if (row.status==='Aprovado' && proposalStage(row)<3) {
