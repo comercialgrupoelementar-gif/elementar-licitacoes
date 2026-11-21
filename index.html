@@ -95,9 +95,9 @@ h2{font-size:24px}h3{font-size:18.72px}
 
 #mobile-menu{display:none}
 @media(max-width:900px){
-.shell{grid-template-columns:minmax(0,1fr)}
+.shell{grid-template-columns:minmax(0,1fr);grid-template-rows:auto 1fr;align-items:start}
 .workspace,.content,#view,#view>.panel,.pagehead>div,.auth-layout>section{min-width:0}
-.sidebar{position:static;height:auto;padding:10px 14px;display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:6px}
+.sidebar{position:static;height:auto;align-self:start;padding:6px 14px;display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:6px}
 .sidebar .brand-space{padding:0}.sidebar .nav-caption,.sidebar-foot,.workspace-tag,.sidebar .wordmark small{display:none}
 #mobile-menu{display:inline-block;width:auto;min-height:44px;padding:6px 14px;border-color:#ffffff40;font-size:14px}
 .sidebar #nav{display:none;grid-column:1/-1;min-width:0;max-height:55vh;overflow:auto}
@@ -121,7 +121,7 @@ input,select,textarea,.sidebar select{font-size:16px}
 }
 </style>
 <script defer src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<script id="app-entry" type="module" src="./app.mjs?v=20261120-28"></script>
+<script id="app-entry" type="module" src="./app.mjs?v=20261120-29"></script>
 </head>
 <body>
 <div id="version-notice" hidden style="padding:10px 18px;background:#f6e8d0">
