@@ -153,6 +153,18 @@ async function save(table, values, id) {
 }
 
 const groupRole = () => groups.find(item => item.id === group)?.role;
+const isDemo = () => group==='4df12050-8638-4906-ae91-f0fb199f266d';
+function demoDelete(table,id,parent,onSaved=render) {
+  if(!isDemo() || !canWrite()) return;
+  action('Excluir',()=>edit('Excluir registro de demonstração',[],async()=>{
+    const {data,error}=await client.from(table).delete().match({id,grupo_id:group}).select('id').maybeSingle();
+    if(error?.code==='23503') throw new Error('Remova primeiro os registros vinculados.');
+    if(error) throw error;
+    if(!data) throw new Error('O registro não está disponível para exclusão.');
+    await load();
+  },{onSaved}),parent);
+}
+
 const canWrite = () => !client || ['admin','operador'].includes(groupRole());
 const writeAction = (label,run,parent,primary) => { if (canWrite()) action(label,run,parent,primary); };
 
@@ -449,6 +461,7 @@ function renderRegistry(view, agencies) {
         : row.tipo+' · '+row.unidade+' · Custo '+money.format(row.custo);
       const card = panel(list,'<strong>'+escape(title)+'</strong><p>'+escape(subtitle)+'</p>');
       writeAction('Editar',()=>open(row),card);
+      demoDelete(table,row.id,card);
     }
   }
   search.oninput = draw;
@@ -773,6 +786,7 @@ function openQuote(view,id) {
   view.replaceChildren();
   byId('page-actions').replaceChildren();
   action('Voltar ao quadro',render,byId('page-actions'));
+  demoDelete('cotacoes',row.id,byId('page-actions'));
   const section=panel(view,'<h2>'+escape(row.titulo)+'</h2><p>'+escape(row.fornecedor)+' · '+stages[row.etapa]+'</p>');
   if (row.observacao) section.insertAdjacentHTML('beforeend','<p>'+escape(row.observacao)+'</p>');
   if (row.etapa<2) {
@@ -1449,6 +1463,7 @@ function icon(name) {
   return `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${iconPaths[name]}"/></svg>`;
 }
 function goTo(key) {
+  if (isDemo() && key==='configuracoes') return;
   page = key;
   activeEdital = null;
   message('');
@@ -1710,6 +1725,7 @@ function render() {
     nav.append(select);
   }
   for (const [key,label] of Object.entries(screens)) {
+    if (isDemo() && key==='configuracoes') continue;
     navAction(key,label,()=>goTo(key),nav);
   }
   if (groupRole() === 'admin') navAction('equipe','Minha equipe',openTeam,nav);
@@ -2170,7 +2186,10 @@ function renderProposal(view,row) {
     const tr = table.querySelector('tbody').insertRow();
     for (const value of [entry.lote,entry.codigo,catalogCode(entry),printedDescription(entry),decimal.format(entry.quantidade),entry.unidade,entry.marca,decimal.format(entry.custo_embalagem/entry.embalagem),decimal.format(entry.margem)+'%',entry.fornecedor,entry.observacao,money.format(price(entry)),money.format(total([entry]))]) tr.insertCell().textContent=value;
     const controls=tr.insertCell();
-    if(row.status==='Aprovado' && proposalStage(row)<3) writeAction('Editar',()=>item(row,entry),controls);
+    if(row.status==='Aprovado' && proposalStage(row)<3) {
+      writeAction('Editar',()=>item(row,entry),controls);
+      demoDelete('itens',entry.id,controls);
+    }
   }
   const attachments = panel(view,'<h2>Documentos selecionados para disputa</h2>');
   proposalAttachments(attachments,row,rows).catch(error=>{if(attachments.isConnected) message(error.message);});
