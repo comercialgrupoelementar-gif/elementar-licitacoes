@@ -604,6 +604,27 @@ const accessLevels=[['bloqueado','Sem acesso'],['consulta','Somente consulta'],[
 let screenAccess={};
 const screenAllowed=key=>!client || !Object.hasOwn(screens,key) || screenAccess[key]!=='bloqueado';
 
+
+const accessPresets = {
+  'Operador': {read:['painel','catalogo','orgaos','ajuda'], write:['editais','documentacao','propostas']},
+  'Representante': {read:['painel','orgaos','catalogo','propostas','propostaPronta','ajuda'], write:['disputa','acompanhamento']},
+  'Administrador 01': {read:['financeiro','configuracoes','aplicativo'], write:['orgaos','catalogo','cotacoes','orcamento','editais','propostas','documentacao','propostaPronta','disputa','acompanhamento','logistica','ajuda']},
+  'Administrador 02': {read:['aplicativo'], write:Object.keys(screens).filter(key=>key!=='aplicativo')},
+  'Auxiliar de Licitação': {read:['painel','catalogo','orgaos','propostas','ajuda'], write:['editais','documentacao']},
+  'Analista de Licitação': {read:['painel','catalogo','orgaos','propostaPronta','ajuda'], write:['editais','documentacao','propostas','disputa','acompanhamento']},
+  'Gerente': {read:['configuracoes','aplicativo','finalizados'], write:Object.keys(screens).filter(key=>!['configuracoes','aplicativo','finalizados'].includes(key))},
+  'Coordenador': {read:['painel','catalogo','orgaos','financeiro','finalizados','ajuda'], write:['editais','documentacao','propostas','propostaPronta','disputa','acompanhamento','logistica']},
+  'Dono': {read:[], write:Object.keys(screens)},
+  'Sócio': {read:Object.keys(screens), write:[]}
+};
+
+function presetScreenRules(preset) {
+  return Object.fromEntries([
+    ...preset.read.map(key=>[key,'consulta']),
+    ...preset.write.map(key=>[key,'operacao'])
+  ]);
+}
+
 function mountCargoManagement(parent,empresa,mestre=false) {
   const section=panel(parent,'<h2>Cargos e regras da equipe</h2>');
   action('Gerenciar cargos e permissões',()=>refresh(),section,true);
@@ -615,11 +636,6 @@ function mountCargoManagement(parent,empresa,mestre=false) {
     content.replaceChildren();
     const levels=(rules,defaultLevel)=>Object.entries(screens).map(([key,label])=>[key,label,'select',rules[key]??defaultLevel,accessLevels]);
     const saveRules=(heading,fields,save)=>edit(heading,fields,save,{onSaved:()=>refresh().catch(error=>message(error.message))});
-    const presets={
-      'Auxiliar de licitação':{painel:'consulta',editais:'operacao',documentacao:'operacao',catalogo:'consulta',propostas:'consulta',ajuda:'consulta'},
-      'Analista de licitação':{painel:'consulta',editais:'operacao',documentacao:'operacao',catalogo:'consulta',propostas:'operacao',propostaPronta:'consulta',disputa:'operacao',acompanhamento:'operacao',ajuda:'consulta'},
-      'Gerente de licitação':Object.fromEntries(Object.keys(screens).map(key=>[key,key==='configuracoes'?'consulta':'operacao']))
-    };
     function editCargo(cargo={}) {
       saveRules('Permissões do cargo',[
         ['nome_cargo','Nome do cargo','text',cargo.nome],...levels(cargo.regras??{},'bloqueado')
@@ -627,9 +643,13 @@ function mountCargoManagement(parent,empresa,mestre=false) {
     }
     if(mestre) action('Definir limites da empresa',()=>saveRules('Limites máximos por tela',
       levels(state.limites,'operacao'),regras_telas=>call('licitacoes_gravar_limites',{empresa,regras_telas})),content,true);
-    action('Criar cargo',()=>editCargo(),content,true);
+    action('Cadastrar novo perfil',()=>editCargo(),content,true);
     const template=panel(content,'<h3>Modelos de cargo</h3>');
-    for(const [nome,regras] of Object.entries(presets)) action(nome,()=>editCargo({nome,regras}),template);
+    const availablePresets=Object.keys(accessPresets).filter(name=>!state.cargos.some(cargo=>cargo.nome===name));
+    if(availablePresets.length) action('Adicionar perfil padrão',()=>edit('Adicionar perfil padrão',[
+      ['nome','Perfil','select',availablePresets[0],availablePresets]
+    ],({nome})=>call('licitacoes_gravar_cargo',{empresa,nome_cargo:nome,regras_cargo:presetScreenRules(accessPresets[nome])}),
+    {onSaved:()=>refresh().catch(error=>message(error.message))}),template);
     const cargos=panel(content,'<h3>Cargos cadastrados</h3>');
     if(!state.cargos.length) cargos.append('Nenhum cargo personalizado cadastrado.');
     for(const cargo of state.cargos) {
@@ -640,10 +660,27 @@ function mountCargoManagement(parent,empresa,mestre=false) {
     for(const member of state.integrantes) {
       const current=state.cargos.find(cargo=>cargo.id===member.cargo_id);
       const card=panel(members,'<strong>'+escape(member.email)+'</strong><p>'+escape(current?.nome??member.papel)+'</p>');
+      if(mestre) {
+        action('Telas e permissões do usuário',()=>saveRules('Permissões de '+member.email,[
+          ...Object.entries(screens).map(([key,label])=>[key,label,'select',member.regras_individuais?.[key]??'perfil',[
+            ['perfil','Seguir o perfil'],...accessLevels
+          ]])
+        ],values=>call('licitacoes_gravar_regras_individuais',{empresa,integrante:member.id,
+          regras:Object.fromEntries(Object.entries(values).filter(([,value])=>value!=='perfil'))})),card);
+        if(member.papel!=='admin') action('Ações de cadastro',()=>editRegistryPermissions(empresa,{usuario_id:member.id,email:member.email},refresh),card);
+      }
       if(member.papel==='admin') continue;
       action('Alterar cargo',()=>saveRules('Cargo de '+member.email,[
-        ['cargo','Cargo na empresa','select',member.cargo_id??'base',[['base','Usar perfil básico do usuário'],...state.cargos.map(cargo=>[cargo.id,cargo.nome])]]
-      ],({cargo})=>call('licitacoes_atribuir_cargo',{empresa,integrante:member.id,cargo:cargo==='base'?null:cargo})),card);
+        ['cargo','Cargo na empresa','select',member.cargo_id??'base',[['base','Usar perfil básico do usuário'],...state.cargos.map(cargo=>[cargo.id,cargo.nome]),...availablePresets.map(nome=>['modelo:'+nome,nome])]]
+      ],async ({cargo})=>{
+        if(cargo.startsWith('modelo:')) {
+          const nome=cargo.slice(7);
+          await call('licitacoes_gravar_cargo',{empresa,nome_cargo:nome,regras_cargo:presetScreenRules(accessPresets[nome])});
+          const updated=await call('licitacoes_painel_cargos',{empresa});
+          cargo=updated.cargos.find(profile=>profile.nome===nome).id;
+        }
+        await call('licitacoes_atribuir_cargo',{empresa,integrante:member.id,cargo:cargo==='base'?null:cargo});
+      }),card);
     }
   }
 }
