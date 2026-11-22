@@ -591,7 +591,9 @@ async function call(name, args) {
   return data;
 }
 
+let masterNavigationRequest=0;
 async function openClients(key='clientes') {
+  const request=++masterNavigationRequest;
   if (['clientes','masterAssinaturas','masterFinanceiro'].includes(key)) await loadCommercialRecords();
   if (['clientes','masterEmpresas','masterAcessos','masterAparencia','masterAssinaturas','masterFinanceiro','masterSuporte'].includes(key)) clients = await call('licitacoes_clientes');
   if(key==='clientes') {
@@ -599,6 +601,7 @@ async function openClients(key='clientes') {
     if(error) throw error;
     openTicketCount=count ?? 0;
   }
+  if(request!==masterNavigationRequest || !master) return;
   page = key; activeEdital = null; render();
 }
 
@@ -630,10 +633,14 @@ function presetScreenRules(preset) {
 }
 
 function mountCargoManagement(parent,empresa,mestre=false) {
-  const section=panel(parent,'<h2>Cargos e regras da equipe</h2>');
-  action('Gerenciar cargos e permissões',()=>refresh(),section,true);
+  const section=panel(parent,'<h2>Perfis e permissões</h2><p>Os perfis definem as regras padrão. O limite da empresa é o máximo permitido. As permissões individuais ajustam a regra de cada usuário dentro desse limite.</p>');
+  if(!mestre) action('Gerenciar cargos e permissões',()=>refresh(),section,true);
   const content=document.createElement('div');
   section.append(content);
+  if(mestre) {
+    content.textContent='Carregando perfis…';
+    refresh().catch(error=>{ if(content.isConnected) content.textContent='Não foi possível carregar os perfis. '+error.message; });
+  }
   async function refresh() {
     const state=await call('licitacoes_painel_cargos',{empresa});
     if(!content.isConnected) return;
@@ -648,22 +655,25 @@ function mountCargoManagement(parent,empresa,mestre=false) {
     if(mestre) action('Definir limites da empresa',()=>saveRules('Limites máximos por tela',
       levels(state.limites,'operacao'),regras_telas=>call('licitacoes_gravar_limites',{empresa,regras_telas})),content,true);
     action('Cadastrar novo perfil',()=>editCargo(),content,true);
-    const template=panel(content,'<h3>Modelos de cargo</h3>');
+    if(mestre) renderProfileOverview(content,state,editCargo);
+    const template=mestre?null:panel(content,'<h3>Modelos de cargo</h3>');
     const availablePresets=Object.keys(accessPresets).filter(name=>!state.cargos.some(cargo=>cargo.nome===name));
-    if(availablePresets.length) action('Adicionar perfil padrão',()=>edit('Adicionar perfil padrão',[
+    if(!mestre && availablePresets.length) action('Adicionar perfil padrão',()=>edit('Adicionar perfil padrão',[
       ['nome','Perfil','select',availablePresets[0],availablePresets]
     ],({nome})=>call('licitacoes_gravar_cargo',{empresa,nome_cargo:nome,regras_cargo:presetScreenRules(accessPresets[nome])}),
     {onSaved:()=>refresh().catch(error=>message(error.message))}),template);
+    if(!mestre) {
     const cargos=panel(content,'<h3>Cargos cadastrados</h3>');
     if(!state.cargos.length) cargos.append('Nenhum cargo personalizado cadastrado.');
     for(const cargo of state.cargos) {
       const card=panel(cargos,'<strong>'+escape(cargo.nome)+'</strong> ');
       action('Editar permissões',()=>editCargo(cargo),card);
     }
-    const members=panel(content,'<h3>Atribuir cargos aos usuários</h3>');
+    }
+    const members=panel(content,'<h3>Perfis atribuídos e regras individuais</h3>');
     for(const member of state.integrantes) {
       const current=state.cargos.find(cargo=>cargo.id===member.cargo_id);
-      const card=panel(members,'<strong>'+escape(member.email)+'</strong><p>'+escape(current?.nome??member.papel)+'</p>');
+      const card=panel(members,'<strong>'+escape(member.email)+'</strong><p>'+escape(profileLabel(member.papel,current?.nome))+'</p>');
       if(mestre) {
         action('Telas e permissões do usuário',()=>saveRules('Permissões de '+member.email,[
           ...Object.entries(screens).map(([key,label])=>[key,label,'select',member.regras_individuais?.[key]??'perfil',[
@@ -687,6 +697,37 @@ function mountCargoManagement(parent,empresa,mestre=false) {
       }),card);
     }
   }
+}
+
+function renderProfileOverview(parent,state,editCargo) {
+  const section=panel(parent,'<h3>Telas por perfil</h3><p>Os modelos aparecem para consulta. Ao salvar um modelo, ele vira um perfil editável desta empresa.</p>');
+  const profiles=[
+    ...Object.entries(accessPresets).map(([nome,preset])=>state.cargos.find(cargo=>cargo.nome===nome)??{nome,regras:presetScreenRules(preset)}),
+    ...state.cargos.filter(cargo=>!Object.hasOwn(accessPresets,cargo.nome))
+  ];
+  const label=document.createElement('label');
+  const select=document.createElement('select');
+  for(const [index,profile] of profiles.entries()) select.add(new Option(profile.nome,String(index)));
+  label.append('Perfil',select);
+  section.append(label);
+  const result=document.createElement('div');
+  result.className='table-wrap';
+  section.append(result);
+  const levels=Object.fromEntries(accessLevels);
+  const rank=Object.keys(levels);
+  function show() {
+    const profile=profiles[Number(select.value)];
+    const rows=Object.entries(screens).map(([key,name])=>{
+      const rule=profile.regras[key]??'bloqueado';
+      const limit=state.limites[key]??'operacao';
+      const effective=rank[Math.min(rank.indexOf(rule),rank.indexOf(limit))];
+      return '<tr><th scope="row">'+escape(name)+'</th><td>'+escape(levels[rule])+'</td><td>'+escape(levels[effective])+'</td></tr>';
+    }).join('');
+    result.innerHTML='<p>'+ (profile.id?'Perfil cadastrado':'Modelo padrão')+'</p><table><thead><tr><th scope="col">Tela</th><th scope="col">Regra do perfil</th><th scope="col">Após limite da empresa</th></tr></thead><tbody>'+rows+'</tbody></table>';
+  }
+  select.onchange=show;
+  action('Editar permissões do perfil',()=>editCargo(profiles[Number(select.value)]),section,true);
+  show();
 }
 
 let teamNames={};
@@ -1227,6 +1268,7 @@ async function openAccessConfiguration(parent,company,byUser) {
 }
 
 function renderClients(view) {
+  if(page==='masterAcessos') { renderMasterAccess(view); return; }
   const section = panel(view,'<h2>Empresas cadastradas</h2>');
   if(page==='masterEmpresas') action('Cadastrar empresa cliente', () => edit('Nova empresa cliente', [
     ['nome_cliente','Nome da empresa','text'],['email_admin','E-mail do administrador cadastrado','email']
@@ -1245,20 +1287,44 @@ function renderClients(view) {
       card.append(settings);
       renderVisualPreview(settings,customer.id);
     },card);
-    if(page==='masterAcessos') {
-      const members=panel(card,'<h3>Permissões por conta</h3>');
-      const permissions=panel(card,'<h3>Acesso e aliases</h3>');
-      const refreshMembers=()=>showMemberProfiles(members,customer.id,async ()=>{
-        if(permissions.dataset.loaded) await openAccessConfiguration(permissions,customer,true);
-      });
-      action('Consultar integrantes',refreshMembers,card);
-      action('Configurar acesso dos usuários',async ()=>{
-        await openAccessConfiguration(permissions,customer,true);
-        permissions.dataset.loaded='true';
-      },card);
-      mountCargoManagement(card,customer.id,true);
-    }
+
   }
+}
+
+let selectedAccessCompany;
+let selectedAccessView='profiles';
+
+function renderMasterAccess(view) {
+  const section=panel(view,'<h2>Controle de acesso por empresa</h2>');
+  if(!clients.length) { section.append('Nenhuma empresa cadastrada.'); return; }
+  const companyLabel=document.createElement('label');
+  const companySelect=document.createElement('select');
+  companyLabel.append('Empresa',companySelect);
+  for(const customer of clients) companySelect.add(new Option(customer.nome,customer.id));
+  companySelect.value=clients.find(customer=>customer.id===selectedAccessCompany)?.id??clients[0].id;
+  companySelect.onchange=()=>{ selectedAccessCompany=companySelect.value; render(); };
+  section.append(companyLabel);
+  const controls=document.createElement('div');
+  controls.className='line';
+  section.append(controls);
+  for(const [key,label] of [['profiles','Perfis e acesso por tela'],['accounts','Usuários, validade e aliases']]) {
+    const button=action(label,()=>{ selectedAccessView=key; render(); },controls,selectedAccessView===key);
+    button.setAttribute('aria-pressed',String(selectedAccessView===key));
+  }
+  const customer=clients.find(item=>item.id===companySelect.value);
+  if(selectedAccessView==='profiles') { mountCargoManagement(section,customer.id,true); return; }
+  const card=panel(section,'<p>Selecione um usuário para trocar seu perfil, ajustar ações de cadastro ou conferir a validade do acesso.</p>');
+  const members=panel(card,'<h3>Permissões por conta</h3>');
+  const permissions=panel(card,'<h3>Acesso e aliases</h3>');
+  const refreshMembers=()=>showMemberProfiles(members,customer.id,async ()=>{
+    if(permissions.dataset.loaded) await openAccessConfiguration(permissions,customer,true);
+  });
+  action('Consultar integrantes',refreshMembers,card);
+  action('Configurar acesso dos usuários',async ()=>{
+    await openAccessConfiguration(permissions,customer,true);
+    permissions.dataset.loaded='true';
+  },card);
+  refreshMembers().catch(error=>message(error.message));
 }
 
 async function showMemberProfiles(section,customerId,afterChange) {
@@ -3184,6 +3250,7 @@ async function loadGroups(){
   const capability = await client.rpc('licitacoes_eh_mestre');
   if (capability.error && capability.error.code !== 'PGRST202') throw capability.error;
   master = capability.data === true;
+  if(master && page==='painel') page='clientes';
   group=groups[0]?.id;
   await load();
 }
