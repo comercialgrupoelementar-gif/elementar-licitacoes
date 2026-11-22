@@ -17,6 +17,16 @@ function itemBalances(contract,item) {
   return {requested:qty(requested),accepted:qty(accepted),available:qty(item.quantidade-requested),pending:qty(requested-accepted)};
 }
 
+function deliveryItems(contract,kind) {
+  return contract.ordens.flatMap(order=>order.itens.flatMap(line=>{
+    const accepted=line.remessas.reduce((sum,shipment)=>sum+shipment.aceita,0);
+    const delivered=line.remessas.reduce((sum,shipment)=>sum+shipment.entregue,0);
+    const amount=kind==='itens_pendentes'?qty(line.quantidade-(line.cancelada??0)-accepted):kind==='itens_entregues'?qty(delivered):qty(accepted);
+    const item=contract.itens.find(entry=>entry.id===line.id);
+    return amount>0&&item?[{order,item,amount}]:[];
+  }));
+}
+
 function orderSummary(order) {
   let pending=0,accepted=0,awaiting=0;
   for(const item of order.itens) {
@@ -60,11 +70,12 @@ export function contractAlerts(contract) {
 
 const logisticsMenu=[
  ['todos','Todos'],['vigencia','Vigência'],['atraso','Atrasadas'],['entrega','Prazos de entrega'],
+ ['itens_pendentes','Itens a entregar'],['itens_entregues','Itens com entrega registrada'],['itens_aceitos','Itens com aceite'],
  ['aceite','Aguardando aceite'],['saldo','Saldo baixo'],['solicitacao','Solicitações abertas'],['encerrado','Encerrados']
 ];
 
 export function logisticsWorkspace(view, ctx) {
-  const {client,group,master,clients,canWrite,panel,action,edit,escape,table,notice,processes,initialContract}=ctx;
+  const {client,group,master,clients,canWrite,panel,action,edit,escape,table,notice,processes,initialContract,encodePdf,pdfBytes,saveQuoteFile}=ctx;
   const canEdit=!!client&&!master&&canWrite;
   if(!client) { panel(view,'<p>Conecte uma empresa para abrir a Logística.</p>'); return; }
   const root=panel(view,'<h2>'+(master?'Carteira de contratos e logística':'Ordens de fornecimento e contratos')+'</h2>');
@@ -134,9 +145,16 @@ export function logisticsWorkspace(view, ctx) {
     result.replaceChildren();
     const scope=records.filter(row=>!tenant||row.grupo_id===tenant);
     const count=key=>scope.filter(({dados:c})=>matches(c,key)).length;
+    const delivery=panel(result,'<h3>Entregas por item</h3>');
+    const cards=document.createElement('div');cards.className='line';delivery.append(cards);
+    for(const [key,label] of [['itens_pendentes','Itens a entregar'],['itens_entregues','Itens com entrega registrada'],['itens_aceitos','Itens com aceite']]) {
+      action(label+' · '+scope.reduce((total,{dados})=>total+deliveryItems(dados,key).length,0),()=>{
+        filter=key;controls.querySelectorAll('select')[master?1:0].value=key;list();
+      },cards);
+    }
     if(scope.length) {
       const metrics=panel(result,'<h3>Pendências da carteira</h3>');
-      for(const [key,label] of logisticsMenu.slice(1)) action(label+' · '+count(key),()=>{
+      for(const [key,label] of logisticsMenu.slice(1).filter(([key])=>!key.startsWith('itens_'))) action(label+' · '+count(key),()=>{
         filter=key;controls.querySelectorAll('select')[master?1:0].value=key;list();
       },metrics);
     }
@@ -150,11 +168,16 @@ export function logisticsWorkspace(view, ctx) {
         escape([master?company:null,c.responsavel,c.encerramento?'Encerrado':'Vigência '+dateLabel(contractDue(c))].filter(Boolean).join(' · '))+'</p>');
       if(alerts.length) card.append(alerts.map(alert=>alert.text).join(' · '));
       if(c.solicitacoes.some(requestsOpen)) card.append(' · '+c.solicitacoes.filter(requestsOpen).length+' solicitação(ões) aberta(s)');
+      if(filter.startsWith('itens_')) {
+        const lines=table(card,['Ordem','Item','Quantidade','Prazo']);
+        for(const entry of deliveryItems(c,filter)) cells(lines,[entry.order.numero,entry.item.nome,entry.amount,dateLabel(entry.order.prazo)]);
+      }
       action('Abrir contrato',()=>details(row),card);
     }
   }
   function matches(c,key) {
     if(key==='todos') return true;
+    if(key.startsWith('itens_')) return deliveryItems(c,key).length>0;
     if(key==='encerrado') return !!c.encerramento;
     if(key==='solicitacao') return !c.encerramento&&c.solicitacoes.some(requestsOpen);
     return contractAlerts(c).some(alert=>key==='atraso'?alert.late:alert.kind===key);
@@ -172,6 +195,15 @@ export function logisticsWorkspace(view, ctx) {
     if(alerts.length) panel(card,'<ul>'+alerts.map(alert=>'<li>'+escape(alert.text)+'</li>').join('')+'</ul>');
     if((writable||master)&&!c.encerramento) action('Configurar alertas',()=>configure(row),card);
     const items=panel(result,'<h3>Saldo por item</h3>');
+    if(!contractDue(c)) panel(card,'<p>Vigência pendente. Complete o cadastro para emitir ordens.</p>');
+    if(writable) action('Completar dados do contrato ou ata',()=>form('Dados do contrato ou ata',[
+      ['numero','Número do instrumento','text',c.numero],['arp','Número da ata','text',c.arp],
+      ['fim','Fim da vigência do contrato','date',c.fim],['fim_arp','Fim da vigência da ata','date',c.fim_arp],
+      ['responsavel','Responsável','text',c.responsavel]
+    ],values=>{
+      if(!values.fim&&!values.fim_arp) throw new Error('Informe pelo menos uma data de vigência.');
+      return save(row,{...c,...values},'Identificação e vigência atualizadas');
+    },['arp','fim','fim_arp']),card);
     if(writable) action('Adicionar item',()=>addItem(row),items);
     const saldo=table(items,['Item','Contratado','Solicitado','Aceito','Pendente','Disponível','Preço vigente']);
     for(const item of c.itens) {
@@ -181,6 +213,25 @@ export function logisticsWorkspace(view, ctx) {
     const orders=panel(result,'<h3>Ordens de fornecimento</h3>');
     if(writable&&c.itens.length&&daysTo(contractDue(c))>=0) action('Nova ordem',()=>newOrder(row),orders,true);
     for(const order of c.ordens) showOrder(orders,row,order,writable);
+    const documents=panel(result,'<h3>Solicitações do órgão e documentos recebidos</h3>');
+    if(writable) action('Anexar solicitação em PDF',()=>form('Anexar solicitação do órgão',[
+      ['nome','Identificação do documento ou número da ordem','text'],['arquivo','Documento em PDF','file']
+    ],async ({nome,arquivo})=>{
+      const pdf=await encodePdf(arquivo);
+      const {error}=await client.from('logistica_solicitacao_arquivos').insert({contrato_id:row.id,nome:nome.trim(),pdf});
+      if(error) throw error;
+    }),documents,true);
+    const docList=panel(documents,'<p>Carregando documentos…</p>');
+    client.from('logistica_solicitacao_arquivos').select('id,nome,criado_em').eq('contrato_id',row.id).order('criado_em',{ascending:false}).then(({data,error})=>{
+      if(!docList.isConnected) return;
+      docList.replaceChildren();
+      if(error||!data.length) {docList.textContent=error?'Não foi possível carregar os documentos.':'Nenhuma solicitação anexada.';return;}
+      for(const doc of data) action('Baixar '+doc.nome,async ()=>{
+        const {data,error}=await client.from('logistica_solicitacao_arquivos').select('pdf').eq('id',doc.id).eq('contrato_id',row.id).single();
+        if(error) throw error;
+        saveQuoteFile(new Blob([pdfBytes(data.pdf)],{type:'application/pdf'}),doc.nome.replace(/\.pdf$/i,'')+'.pdf');
+      },docList);
+    });
     const requests=panel(result,'<h3>Solicitações e alterações</h3>');
     if(writable) {
       if(c.itens.length) action('Solicitar revisão de preço',()=>newRequest(row,'Revisão de preço'),requests);

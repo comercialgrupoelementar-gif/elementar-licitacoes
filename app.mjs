@@ -615,7 +615,7 @@ const screenAllowed=key=>!client || !Object.hasOwn(screens,key) || screenAccess[
 const accessPresets = {
   'Operador': {read:['painel','catalogo','orgaos','ajuda'], write:['editais','documentacao','propostas']},
   'Representante': {read:['painel','orgaos','catalogo','propostas','propostaPronta','ajuda'], write:['disputa','acompanhamento']},
-  'Administrador 01': {read:['financeiro','configuracoes','aplicativo'], write:['orgaos','catalogo','cotacoes','orcamento','editais','propostas','documentacao','propostaPronta','disputa','acompanhamento','logistica','ajuda']},
+  'Administrador 01': {read:['financeiro','configuracoes','aplicativo','finalizados'], write:['orgaos','catalogo','cotacoes','orcamento','editais','propostas','documentacao','propostaPronta','disputa','acompanhamento','logistica','ajuda']},
   'Administrador 02': {read:['aplicativo'], write:Object.keys(screens).filter(key=>key!=='aplicativo')},
   'Auxiliar de Licitação': {read:['painel','catalogo','orgaos','propostas','ajuda'], write:['editais','documentacao']},
   'Analista de Licitação': {read:['painel','catalogo','orgaos','propostaPronta','ajuda'], write:['editais','documentacao','propostas','disputa','acompanhamento']},
@@ -2327,9 +2327,9 @@ function openFollow(view,row) {
   if(!locked) writeAction('Enviar para Processos Finalizados',()=>edit('Finalizar processo',[],async()=>{
     const current=record??await ensureFollow(row);
     await updateFollow(current,{finalizado_em:new Date().toISOString()});
-  },{onSaved:()=>{page='finalizados';render();},decorate:form=>{
+  },{onSaved:()=>{if(screenAllowed('finalizados')) page='finalizados'; render();},decorate:form=>{
     const notice=document.createElement('p');
-    notice.textContent='O processo e seus documentos serão arquivados para consulta.';
+    notice.textContent='O processo será arquivado. Se houver itens ganhos, eles entrarão na Logística com as quantidades e preços finais. Anexe o contrato ou a ata de registro de preços antes de concluir.';
     form.prepend(notice);
   }}),docs);
 }
@@ -2363,7 +2363,7 @@ function renderLogistics(view,consolidated) {
   const initialContract=logisticsContract;
   logisticsContract=null;
   logisticsWorkspace(view,{client,group,master:consolidated,clients,canWrite:canWrite(),initialContract,
-    panel,action,edit,escape,table:quoteTable,notice:message,processes});
+    panel,action,edit,escape,table:quoteTable,notice:message,processes,encodePdf,pdfBytes,saveQuoteFile});
 }
 
 function renderFollow(view) {
