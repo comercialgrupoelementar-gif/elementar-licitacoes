@@ -1,4 +1,4 @@
-import {themes as reportThemes,defaults as reportDefaults,collectReport,chartData,renderExecutivePdf} from './relatorios.mjs?v=20261122-57';
+import {defaults as reportDefaults,collectReport,chartData,reportCompanyIdentity,renderExecutivePdf} from './relatorios.mjs?v=20261122-58';
 import {contractAlerts, logisticsWorkspace} from './logistica.mjs?v=20261122-53';
 import {normalizeDocument, validDocument} from './documentos.mjs';
 import {makeZip} from './pacote.mjs';
@@ -2880,10 +2880,14 @@ function mountScreenReport(view) {
     const report=collectReport(view);
     if(!report.tables.length&&!report.notes.length) {message('A tela ainda não tem dados para exportar.');return;}
     const prefs=reportSettings();
+    const companies=master?[]:db.empresas;
+    const linkedCompany=db.editais.find(row=>row.id===activeEdital)?.empresa_id;
+    const defaultCompany=companies.find(row=>row.id===linkedCompany)?.id??(companies.length===1?companies[0].id:'grupo');
     let chartControls;
     edit('Preparar relatório para a diretoria',[
       ['formato','Formato','select','pdf',[['pdf','PDF executivo'],['csv','CSV para análise']]],
       ['titulo','Título do relatório','text',title],
+      ...(companies.length?[['empresa_relatorio','Empresa no cabeçalho','select',defaultCompany,[['grupo','Identificação do espaço de trabalho'],...companies.map(row=>[row.id,row.nome+' · '+row.cnpj])]]]:[]),
       ['resumo','Resumo executivo e próximos passos','textarea',''],
       ['tema','Paleta de cores','select',prefs.tema,reportThemeChoices],
       ['detalhes','Incluir tabelas no PDF','select',prefs.detalhes,reportYesNo]
@@ -2906,7 +2910,8 @@ function mountScreenReport(view) {
       const Pdf=await proposalPdfLibrary();
       const pdf=new Pdf({unit:'mm',format:'a4'});
       const issuer=master?'Mestre Gerenciador':groups.find(row=>row.id===group)?.nome;
-      renderExecutivePdf(pdf,{title:values.titulo,issuer,date:new Date().toLocaleDateString('pt-BR'),
+      const company=companies.find(row=>row.id===values.empresa_relatorio);
+      renderExecutivePdf(pdf,{title:values.titulo,issuer,company:reportCompanyIdentity(company),date:new Date().toLocaleDateString('pt-BR'),
         summary:values.resumo.trim(),theme:values.tema,details:values.detalhes==='sim',report,charts});
       pdf.save(file+'.pdf');
     },{onSaved:()=>{},decorate:form=>{
@@ -3263,6 +3268,7 @@ function renderCompanyRepresentatives(card,company) {
     },{decorate:form=>{for(const field of form.querySelectorAll('input')) field.required=field.name==='signatario';}});
   }
   const section=panel(card,'<h4>Representantes legais</h4>');
+  section.dataset.reportPrivate='';
   participantAction('Cadastrar representante',()=>editRepresentative(),section);
   for(const person of list) {
     const row=panel(section,'<p>'+escape(person.signatario+(person.cargo?' · '+person.cargo:''))+'</p>');

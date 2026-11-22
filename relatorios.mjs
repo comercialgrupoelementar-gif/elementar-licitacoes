@@ -1,15 +1,30 @@
 
 export const themes={azul:[20,64,112],verde:[18,94,77],vinho:[124,41,60]};
 export const defaults={tema:'azul',detalhes:'sim',graficos:'sim'};
+const privateFields=/^(?:dados bancários|banco|agência|conta(?: bancária)?|(?:chave )?pix|representantes?(?: legais?)?|nome do representante(?: legal)?|signatário|cpf|rg|nacionalidade)\s*(?:$|:)/i;
+export function reportCompanyIdentity(company) {
+ if(!company) return null;
+ const saved=company.dados_proposta??{};
+ return {
+   name:company.nome,
+   cnpj:company.cnpj,
+   stateRegistration:saved.inscricao_estadual,
+   municipalRegistration:saved.inscricao_municipal,
+   address:saved.endereco,
+   phone:saved.telefone,
+   email:saved.email,
+   logo:saved.logo
+ };
+}
 export function collectReport(view) {
- const tables=[...view.querySelectorAll('table')].filter(el=>el.getClientRects().length).map((table,index)=>{
+ const tables=[...view.querySelectorAll('table')].filter(el=>el.getClientRects().length&&!el.closest('[data-report-private]')).map((table,index)=>{
    const rows=[...table.rows].filter(row=>row.getClientRects().length);
    const header=rows[0];
-   const cols=header?[...header.cells].map((cell,i)=>({name:cell.innerText.trim(),i})).filter(c=>c.name&&!/^(ação|ações|acesso)$/i.test(c.name)):[];
+   const cols=header?[...header.cells].map((cell,i)=>({name:cell.innerText.trim(),i})).filter(c=>c.name&&!/^(ação|ações|acesso)$/i.test(c.name)&&!privateFields.test(c.name)):[];
    return {name:table.caption?.innerText||table.closest('section')?.querySelector('h2,h3')?.innerText||'Tabela '+(index+1),
      headers:cols.map(c=>c.name),rows:rows.slice(1).map(row=>cols.map(c=>row.cells[c.i]?.querySelector('meter')?.value?.toString()??row.cells[c.i]?.innerText.trim()??''))};
  }).filter(t=>t.headers.length&&t.rows.length);
- const notes=[...view.querySelectorAll('h2,h3,p,small,.metric')].filter(el=>el.getClientRects().length&&!el.closest('table')&&!el.closest('form')&&!el.querySelector('p,h2,h3')).map(el=>el.innerText.trim()).filter(Boolean);
+ const notes=[...view.querySelectorAll('h2,h3,p,small,.metric')].filter(el=>el.getClientRects().length&&!el.closest('table')&&!el.closest('form,[data-report-private]')&&!el.querySelector('p,h2,h3')).map(el=>el.innerText.trim()).filter(text=>text&&!privateFields.test(text));
  return {tables,notes};
 }
 function numeric(value) {
@@ -27,7 +42,7 @@ export function chartData(table,labelIndex,metric) {
  }
  return [...byLabel].sort((a,b)=>Math.abs(b[1])-Math.abs(a[1]));
 }
-export function renderExecutivePdf(pdf,{title,issuer,date,summary,theme,details,report,charts}) {
+export function renderExecutivePdf(pdf,{title,issuer,company,date,summary,theme,details,report,charts}) {
  const rgb=themes[theme]??themes.azul, width=182;
  let y;
  function page(first) {
@@ -46,7 +61,28 @@ export function renderExecutivePdf(pdf,{title,issuer,date,summary,theme,details,
  }
  function section(label){space(16); y+=4; line(label,13,true); y+=2;}
  page(true);
- if(issuer) line(issuer,11,true);
+ if(company) {
+   const image=company.logo??'';
+   if(/^data:image\/(png|jpeg);base64,/.test(image)) {
+     try {
+       const {width:iw,height:ih,fileType}=pdf.getImageProperties(image);
+       if(iw>0&&ih>0) {
+         const scale=Math.min(48/iw,22/ih);
+         pdf.addImage(image,fileType,14,y-3,iw*scale,ih*scale);
+         y+=ih*scale+4;
+       }
+     } catch {
+       line('Logo indisponível no cadastro.',8);
+     }
+   }
+   line(company.name,12,true);
+   for(const [label,value] of [
+     ['CNPJ',company.cnpj],['Inscrição estadual',company.stateRegistration],
+     ['Inscrição municipal',company.municipalRegistration],['Endereço',company.address],
+     ['Telefone',company.phone],['E-mail',company.email]
+   ]) if(value) line(label+': '+value,9);
+ } else if(issuer) line(issuer,11,true);
+
  if(summary){section('Resumo executivo');line(summary);}
  const count=report.tables.reduce((sum,t)=>sum+t.rows.length,0);
  space(22);pdf.setFillColor(233,240,246);pdf.roundedRect(14,y,182,17,2,2,'F');y+=10;
