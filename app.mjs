@@ -834,7 +834,18 @@ function editCommercialRecord(type, record = {}) {
 
 
 function renderPlatformOverview(view,today,money) {
-  const header=panel(view,'<h2>Gestão da plataforma</h2><div class="line"></div>');
+  const deadlines=panel(view,'<h2>Prazos e pendências</h2><div></div>').lastElementChild;
+  const hero=document.createElement('section');
+  hero.className='overview-banner';
+  hero.innerHTML='<div><span class="eyebrow">ADMINISTRAÇÃO DA PLATAFORMA</span><h2>Clientes, assinaturas e suporte.</h2><p>Acompanhe a carteira e resolva as pendências da plataforma.</p><div class="hero-buttons"></div></div><div class="banner-side"></div>';
+  view.append(hero);
+  const shortcuts=hero.querySelector('.hero-buttons');
+  action('Ver empresas clientes',()=>openMasterPage('masterEmpresas'),shortcuts).className='accent';
+  action('Ver assinaturas',()=>openMasterPage('masterAssinaturas'),shortcuts).className='outline-light';
+  action('Ver chamados',()=>openMasterPage('masterSuporte'),shortcuts).className='outline-light';
+  const bannerStats=hero.querySelector('.banner-side');
+  const header=panel(view,'<h2>Análise da plataforma</h2><div class="line"></div>');
+
   const controls=header.querySelector('.line');
   function filter(label,options) {
     const wrapper=document.createElement('label');
@@ -846,7 +857,11 @@ function renderPlatformOverview(view,today,money) {
     return select;
   }
   const company=filter('Empresa',[['','Todas as empresas'],...clients.map(row=>[row.id,row.nome])]);
-  const period=filter('Vencimento das cobranças',[['','Todos os períodos'],['month','Mês atual'],['year','Ano atual']]);
+  const years=[...new Set([today.slice(0,4),...commercialRecords.map(row=>row.prazo?.slice(0,4)).filter(Boolean)])].sort().reverse();
+  const year=filter('Ano em vigor',[...years.map(value=>[value,value]),['','Todos os anos']]);
+  const grouping=filter('Agrupar por',[['status','Situação'],['company','Empresa'],['month','Mês do vencimento']]);
+  const indicator=filter('Indicador do gráfico',[['value','Valor das cobranças'],['count','Número de cobranças']]);
+
   const results=document.createElement('div');
   view.append(results);
   function draw() {
@@ -854,12 +869,33 @@ function renderPlatformOverview(view,today,money) {
     const filteredClients=clients.filter(row=>!company.value||row.id===company.value);
     const scoped=commercialRecords.filter(row=>!company.value||row.grupo_id===company.value);
     const subscriptions=scoped.filter(row=>row.tipo==='assinatura');
-    const charges=scoped.filter(row=>row.tipo==='cobranca'&&(!period.value||
-      row.prazo?.startsWith(today.slice(0,period.value==='month'?7:4))));
+    const charges=scoped.filter(row=>row.tipo==='cobranca'&&(!year.value||row.prazo?.startsWith(year.value)));
     const pending=charges.filter(row=>row.situacao==='Pendente');
     const overdue=pending.filter(row=>row.prazo&&row.prazo<today);
     const received=charges.filter(row=>row.situacao==='Recebida');
     const sum=rows=>rows.reduce((value,row)=>value+Number(row.valor||0),0);
+    const active=subscriptions.filter(row=>row.situacao==='Ativa');
+    bannerStats.innerHTML=[['Empresas clientes',filteredClients.length],['Assinaturas ativas',active.length],
+      ['Cobranças vencidas',overdue.length],['A receber',money.format(sum(pending))]]
+      .map(([label,value])=>'<div><span>'+escape(label)+'</span><strong>'+escape(value)+'</strong></div>').join('');
+    const soon=new Date(today+'T00:00:00Z');
+    soon.setUTCDate(soon.getUTCDate()+7);
+    const cutoff=soon.toISOString().slice(0,10);
+    const dueSoon=pending.filter(row=>row.prazo&&row.prazo>=today&&row.prazo<=cutoff);
+    const renewal=active.filter(row=>row.prazo&&row.prazo>=today&&row.prazo<=cutoff);
+    const pendingRows=[...overdue.map(row=>[row,'Cobrança vencida']),...dueSoon.map(row=>[row,'Cobrança a vencer']),
+      ...renewal.map(row=>[row,'Assinatura a vencer'])].sort(([a],[b])=>a.prazo.localeCompare(b.prazo));
+    deadlines.replaceChildren();
+    if(!pendingRows.length) deadlines.textContent='Nenhuma cobrança vencida ou vencimento nos próximos sete dias para estes filtros.';
+    else {
+      const deadlineTable=quoteTable(deadlines,['Prazo','Empresa','Pendência','Registro']);
+      for(const [entry,label] of pendingRows.slice(0,10)) {
+        const row=deadlineTable.insertRow();
+        for(const value of [entry.prazo.split('-').reverse().join('/'),clients.find(c=>c.id===entry.grupo_id)?.nome??'Empresa',label,entry.titulo]) row.insertCell().textContent=value;
+      }
+      if(pendingRows.length>10) deadlines.append('Exibindo as 10 primeiras de '+pendingRows.length+' pendências.');
+    }
+
     const grid=panel(results,'<h3>Indicadores da plataforma</h3>');
     const cards=document.createElement('div');cards.className='grid overview-metrics';grid.append(cards);
     function metric(title,value,route) {
@@ -890,9 +926,16 @@ function renderPlatformOverview(view,today,money) {
       }
     }
     chart('Assinaturas por situação',commercialSections.assinatura[2].map(status=>[status,subscriptions.filter(row=>row.situacao===status).length]),String);
-    chart('Valores das cobranças por situação',[
-      ['A receber no prazo',sum(pending.filter(row=>!overdue.includes(row)))],['Vencidas',sum(overdue)],['Recebidas',sum(received)]
-    ],value=>money.format(value));
+    const dimensions=new Map();
+    for(const row of charges) {
+      const label=grouping.value==='company'?(clients.find(c=>c.id===row.grupo_id)?.nome??'Empresa'):
+        grouping.value==='month'?(row.prazo?.slice(0,7).split('-').reverse().join('/')??'Sem vencimento'):
+        row.situacao==='Pendente'?(row.prazo&&row.prazo<today?'Vencida':'Pendente'):row.situacao;
+      dimensions.set(label,(dimensions.get(label)??0)+(indicator.value==='count'?1:Number(row.valor||0)));
+    }
+    chart('Distribuição das cobranças',[...dimensions].sort((a,b)=>b[1]-a[1]),
+      indicator.value==='count'?String:value=>money.format(value));
+
   }
   draw();
 }
@@ -2880,6 +2923,7 @@ function render() {
     if (client) byId('connection').textContent = 'Sua empresa em movimento, da captação à entrega.';
     if (canWrite()) action('Nova oportunidade',()=>edital(),byId('page-actions'),true).insertAdjacentHTML('afterbegin',icon('plus'));
   }
+  if (platformView && page==='clientes') action('Empresas clientes',()=>openMasterPage('masterEmpresas'),byId('page-actions'),true);
   if ((session||!client)&&(group||platformView||!client)) mountScreenReport(view);
   if (client && !session) {
     const access = document.createElement('div');
