@@ -1,3 +1,4 @@
+import {themes as reportThemes,defaults as reportDefaults,collectReport,chartData,renderExecutivePdf} from './relatorios.mjs?v=20261122-57';
 import {contractAlerts, logisticsWorkspace} from './logistica.mjs?v=20261122-53';
 import {normalizeDocument, validDocument} from './documentos.mjs';
 import {makeZip} from './pacote.mjs';
@@ -970,6 +971,7 @@ const masterPages = {
   masterSuporte:'Chamados de clientes',
   masterAparencia:'Aparência por tela',
   masterAuditoria:'Auditoria administrativa',
+  masterRelatorios:'Configurações de relatórios',
   masterVersoes:'Versão do sistema'
 };
 
@@ -1308,6 +1310,7 @@ function renderCustomerTickets(view, attending=false) {
 }
 
 function renderMasterPage(view) {
+  if(page==='masterRelatorios') { renderReportSettings(view); return; }
   if(page==='masterSuporte') { renderCustomerTickets(view,true); return; }
   const commercial = {masterAssinaturas:'assinatura',masterFinanceiro:'cobranca'};
   if (page==='clientes' || commercial[page]) {
@@ -1653,7 +1656,8 @@ function renderUpcoming(view) {
 const settingsCategories=[
   ['Empresa e documentos',[]],
   ['Padrões operacionais',[]],
-  ['Aparência e navegação',Object.keys(screens)]
+  ['Aparência e navegação',Object.keys(screens)],
+  ['Configurações de relatórios',[]]
 ];
 let selectedSettings=0;
 
@@ -1691,6 +1695,7 @@ function renderCompanySettings(view) {
     }
     if(client && canWrite() && index===1) renderOperationSettings(section);
     if(client && canWrite() && index===2) renderVisualPreview(section,group,modules);
+    if(index===3) renderReportSettings(section);
   }
 }
 
@@ -2849,49 +2854,97 @@ function applyScreenAppearance(view) {
 
 let previousScreen;
 
+
+const reportThemeChoices=[['azul','Azul institucional'],['verde','Verde petróleo'],['vinho','Vinho']];
+const reportYesNo=[['sim','Sim'],['nao','Não']];
+function reportSettingsKey() {return 'relatorios:'+JSON.stringify([session?.user?.id??'local',master?'mestre':group??'local']);}
+function reportSettings() {
+  try {return {...reportDefaults,...JSON.parse(localStorage.getItem(reportSettingsKey())??'{}')};}
+  catch {return {...reportDefaults};}
+}
+function renderReportSettings(view) {
+  const card=panel(view,'<h2>Preferências do PDF executivo</h2><p>Os padrões são salvos neste navegador para seu usuário e podem ser ajustados a cada exportação.</p>');
+  const prefs=reportSettings();
+  const theme=reportThemeChoices.find(([key])=>key===prefs.tema)?.[1]??'Azul institucional';
+  panel(card,'<p>Tema: '+escape(theme)+' · Gráfico inicial: '+(prefs.graficos==='sim'?'Sim':'Não')+' · Tabelas: '+(prefs.detalhes==='sim'?'Sim':'Não')+'</p>');
+  action('Editar preferências',()=>edit('Configurações de relatórios',[
+    ['tema','Paleta de cores','select',prefs.tema,reportThemeChoices],
+    ['graficos','Incluir um gráfico inicial quando houver dados','select',prefs.graficos,reportYesNo],
+    ['detalhes','Incluir tabelas detalhadas no PDF','select',prefs.detalhes,reportYesNo]
+  ],values=>localStorage.setItem(reportSettingsKey(),JSON.stringify(values))),card,true);
+}
 function mountScreenReport(view) {
   const controls=byId('page-actions');
   const title=byId('page-title').textContent;
-  function collect() {
-    const blocks=[...view.querySelectorAll('table')].filter(table=>table.getClientRects().length);
-    const rows=blocks.flatMap(table=>[...table.rows].filter(row=>row.getClientRects().length).map(row=>
-      [...row.cells].filter(cell=>cell.textContent.trim()&&!cell.querySelector('button')).map(cell=>cell.innerText.trim())));
-    if(rows.length) return rows.filter(row=>row.length);
-    return view.innerText.split(String.fromCharCode(10)).map(line=>line.trim()).filter(Boolean).map(line=>[line]);
-  }
-  function requestReport() {
-    edit('Exportar relatório da tela',[
-      ['formato','Formato','select','csv',[['csv','CSV para análise'],['pdf','PDF para consulta']]]
-    ],async ({formato})=>{
-      const rows=collect();
-      if(!rows.length) throw new Error('A tela ainda não tem dados para exportar.');
-      const file='relatorio-'+title.normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/-$/,'');
-      if(formato==='csv') {
+  action('Exportar relatório',()=>{
+    const report=collectReport(view);
+    if(!report.tables.length&&!report.notes.length) {message('A tela ainda não tem dados para exportar.');return;}
+    const prefs=reportSettings();
+    let chartControls;
+    edit('Preparar relatório para a diretoria',[
+      ['formato','Formato','select','pdf',[['pdf','PDF executivo'],['csv','CSV para análise']]],
+      ['titulo','Título do relatório','text',title],
+      ['resumo','Resumo executivo e próximos passos','textarea',''],
+      ['tema','Paleta de cores','select',prefs.tema,reportThemeChoices],
+      ['detalhes','Incluir tabelas no PDF','select',prefs.detalhes,reportYesNo]
+    ],async values=>{
+      const file='relatorio-'+values.titulo.normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/-$/,'');
+      if(values.formato==='csv') {
+        const rows=report.tables.length?report.tables.flatMap((t,i)=>[...(i?[[]]:[]),t.headers,...t.rows]):report.notes.map(note=>[note]);
         const safe=cell=>'"'+(/^[\s]*[=+@-]/.test(cell)?"'":'')+cell.replaceAll('"','""')+'"';
         const csv=rows.map(row=>row.map(safe).join(';')).join(String.fromCharCode(13,10));
         saveQuoteFile(new Blob([String.fromCharCode(65279),csv],{type:'text/csv;charset=utf-8'}),file+'.csv');
         return;
       }
+      const charts=[...chartControls.querySelectorAll('fieldset')].map(field=>{
+        const [source,label,metric]=field.querySelectorAll('select');
+        const table=report.tables[Number(source.value)];
+        const rows=chartData(table,Number(label.value),metric.value);
+        const metricLabel=metric.value==='count'?'Quantidade':table.headers[Number(metric.value)];
+        return {title:metricLabel+' por '+table.headers[Number(label.value)],rows};
+      });
       const Pdf=await proposalPdfLibrary();
       const pdf=new Pdf({unit:'mm',format:'a4'});
-      const company=db.empresas.length===1?db.empresas[0]:null;
-      let y=placeCompanyLogo(company,pdf,16);
-      const write=(text,size)=>{
-        pdf.setFontSize(size);
-        for(const line of pdf.splitTextToSize(text,178)) {
-          if(y>278) {pdf.addPage();y=16;}
-          pdf.text(line,16,y);y+=size*.5;
-        }
-      };
-      write(title,16);
-      if(company) write(company.nome+' · CNPJ '+company.cnpj,10);
-      write(new Date().toLocaleDateString('pt-BR'),10);
-      y+=4;
-      for(const row of rows) write(row.join('  |  '),9);
+      const issuer=master?'Mestre Gerenciador':groups.find(row=>row.id===group)?.nome;
+      renderExecutivePdf(pdf,{title:values.titulo,issuer,date:new Date().toLocaleDateString('pt-BR'),
+        summary:values.resumo.trim(),theme:values.tema,details:values.detalhes==='sim',report,charts});
       pdf.save(file+'.pdf');
-    },{onSaved:()=>{}});
-  }
-  action('Exportar relatório',requestReport,controls);
+    },{onSaved:()=>{},decorate:form=>{
+      form.elements.resumo.required=false;
+      const section=document.createElement('section');
+      const heading=document.createElement('h3');heading.textContent='Gráficos do PDF';section.append(heading);
+      chartControls=document.createElement('div');section.append(chartControls);
+      form.lastElementChild.before(section);
+      if(!report.tables.length) {section.append('A tela precisa ter uma tabela com dados para montar gráficos.');return;}
+      const add=action('Adicionar gráfico',addChart,section);
+      if(prefs.graficos==='sim') addChart();
+      form.elements.formato.onchange=()=>{section.hidden=form.elements.formato.value!=='pdf';};
+      function addChart() {
+        if(chartControls.children.length>=6)return;
+        const field=document.createElement('fieldset');
+        const legend=document.createElement('legend');legend.textContent='Gráfico';field.append(legend);
+        function select(label) {
+          const wrap=document.createElement('label'), input=document.createElement('select');
+          wrap.append(label,input);field.append(wrap);return input;
+        }
+        const source=select('Tabela de origem'), label=select('Agrupar por'), metric=select('Indicador');
+        report.tables.forEach((table,i)=>source.add(new Option(table.name,String(i))));
+        function parameters() {
+          const table=report.tables[Number(source.value)];
+          label.replaceChildren();metric.replaceChildren(new Option('Quantidade de registros','count'));
+          table.headers.forEach((header,i)=>{
+            label.add(new Option(header,String(i)));
+            if(chartData(table,0,String(i)).length) metric.add(new Option('Somar '+header,String(i)));
+          });
+          const classification=table.headers.findIndex(header=>/situação|status|etapa|categoria|modalidade/i.test(header));
+          if(classification>=0)label.value=String(classification);
+        }
+        source.onchange=parameters;parameters();
+        action('Remover gráfico',()=>{field.remove();add.disabled=false;},field);
+        chartControls.append(field);add.disabled=chartControls.children.length>=6;
+      }
+    }});
+  },controls);
 }
 
 function render() {
