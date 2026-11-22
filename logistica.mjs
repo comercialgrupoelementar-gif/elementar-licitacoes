@@ -76,16 +76,16 @@ const logisticsMenu=[
 ];
 
 export function logisticsWorkspace(view, ctx) {
-  const {client,group,master,clients,canWrite,panel,action,edit,escape,table,notice,processes,initialContract,encodePdf,pdfBytes,saveQuoteFile}=ctx;
-  const canEdit=!!client&&!master&&canWrite;
+  const {client,group,canWrite,panel,action,edit,escape,table,notice,processes,initialContract,encodePdf,pdfBytes,saveQuoteFile}=ctx;
+  const canEdit=!!client&&canWrite;
   if(!client) { panel(view,'<p>Conecte uma empresa para abrir a Logística.</p>'); return; }
-  const root=panel(view,'<h2>'+(master?'Carteira de contratos e logística':'Ordens de fornecimento e contratos')+'</h2>');
+  const root=panel(view,'<h2>Ordens de fornecimento e contratos</h2>');
   const controls=document.createElement('div');
   controls.className='line';
   root.append(controls);
   const result=document.createElement('div');
   root.append(result);
-  let records=[],filter='todos',tenant='',search='',selected=initialContract??null;
+  let records=[],filter='todos',search='',selected=initialContract??null;
   function selectField(label,options,change) {
     const wrapper=document.createElement('label');
     const field=document.createElement('select');
@@ -94,7 +94,6 @@ export function logisticsWorkspace(view, ctx) {
     field.onchange=()=>change(field.value);
     controls.append(wrapper);
   }
-  if(master) selectField('Empresa',[['','Todas as empresas'],...clients.map(row=>[row.id,row.nome])],value=>{tenant=value;list();});
   selectField('Situação',logisticsMenu,value=>{filter=value;list();});
   const query=document.createElement('input');
   query.type='search'; query.placeholder='Número, órgão ou responsável'; query.setAttribute('aria-label','Buscar contrato');
@@ -102,7 +101,7 @@ export function logisticsWorkspace(view, ctx) {
   if(canEdit) action('Cadastrar contrato ou ata',()=>newContract(),controls,true);
   const refresh=async ()=>{
     const request=client.from('contratos_logistica').select('id,grupo_id,edital_id,versao,dados').order('atualizado_em',{ascending:false});
-    const {data,error}=await (master?request:request.eq('grupo_id',group));
+    const {data,error}=await request.eq('grupo_id',group);
     if(error) throw error;
     if(!root.isConnected) return;
     records=data;
@@ -144,19 +143,19 @@ export function logisticsWorkspace(view, ctx) {
   function list() {
     selected=null;
     result.replaceChildren();
-    const scope=records.filter(row=>!tenant||row.grupo_id===tenant);
+    const scope=records;
     const count=key=>scope.filter(({dados:c})=>matches(c,key)).length;
     const delivery=panel(result,'<h3>Entregas por item</h3>');
     const cards=document.createElement('div');cards.className='line';delivery.append(cards);
     for(const [key,label] of [['itens_pendentes','Itens a entregar'],['itens_entregues','Itens com entrega registrada'],['itens_aceitos','Itens com aceite']]) {
       action(label+' · '+scope.reduce((total,{dados})=>total+deliveryItems(dados,key).length,0),()=>{
-        filter=key;controls.querySelectorAll('select')[master?1:0].value=key;list();
+        filter=key;controls.querySelector('select').value=key;list();
       },cards);
     }
     if(scope.length) {
       const metrics=panel(result,'<h3>Pendências da carteira</h3>');
       for(const [key,label] of logisticsMenu.slice(1).filter(([key])=>!key.startsWith('itens_'))) action(label+' · '+count(key),()=>{
-        filter=key;controls.querySelectorAll('select')[master?1:0].value=key;list();
+        filter=key;controls.querySelector('select').value=key;list();
       },metrics);
     }
     const rows=scope.filter(({dados:c})=>matches(c,filter)&&[c.numero,c.arp,c.orgao,c.responsavel].join(' ').toLowerCase().includes(search));
@@ -164,9 +163,8 @@ export function logisticsWorkspace(view, ctx) {
     for(const row of rows) {
       const c=row.dados;
       const alerts=contractAlerts(c);
-      const company=clients.find(item=>item.id===row.grupo_id)?.nome;
       const card=panel(result,'<h3>'+escape(c.numero)+' · '+escape(c.orgao)+'</h3><p>'+
-        escape([master?company:null,c.responsavel,c.encerramento?'Encerrado':'Vigência '+dateLabel(contractDue(c))].filter(Boolean).join(' · '))+'</p>');
+        escape([c.responsavel,c.encerramento?'Encerrado':'Vigência '+dateLabel(contractDue(c))].filter(Boolean).join(' · '))+'</p>');
       if(alerts.length) card.append(alerts.map(alert=>alert.text).join(' · '));
       if(c.solicitacoes.some(requestsOpen)) card.append(' · '+c.solicitacoes.filter(requestsOpen).length+' solicitação(ões) aberta(s)');
       if(filter.startsWith('itens_')) {
@@ -194,7 +192,7 @@ export function logisticsWorkspace(view, ctx) {
     action('Voltar à carteira',list,card);
     const alerts=contractAlerts(c);
     if(alerts.length) panel(card,'<ul>'+alerts.map(alert=>'<li>'+escape(alert.text)+'</li>').join('')+'</ul>');
-    if((writable||master)&&!c.encerramento) action('Configurar alertas',()=>configure(row),card);
+    if(writable) action('Configurar alertas',()=>configure(row),card);
     const items=panel(result,'<h3>Saldo por item</h3>');
     if(!contractDue(c)) panel(card,'<p>Vigência pendente. Complete o cadastro para emitir ordens.</p>');
     if(writable) action('Completar dados do contrato ou ata',()=>form('Dados do contrato ou ata',[
