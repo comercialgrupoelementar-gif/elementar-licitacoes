@@ -1,4 +1,4 @@
-import {contractAlerts, logisticsWorkspace} from './logistica.mjs';
+import {contractAlerts, logisticsWorkspace} from './logistica.mjs?v=20261122-52';
 import {normalizeDocument, validDocument} from './documentos.mjs';
 import {makeZip} from './pacote.mjs';
 import {supabaseUrl, supabasePublishableKey} from './config.mjs';

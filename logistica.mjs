@@ -21,7 +21,8 @@ function deliveryItems(contract,kind) {
   return contract.ordens.flatMap(order=>order.itens.flatMap(line=>{
     const accepted=line.remessas.reduce((sum,shipment)=>sum+shipment.aceita,0);
     const delivered=line.remessas.reduce((sum,shipment)=>sum+shipment.entregue,0);
-    const amount=kind==='itens_pendentes'?qty(line.quantidade-(line.cancelada??0)-accepted):kind==='itens_entregues'?qty(delivered):qty(accepted);
+    const awaiting=line.remessas.filter(shipment=>!shipment.conferida).reduce((sum,shipment)=>sum+shipment.entregue,0);
+    const amount=kind==='itens_pendentes'?qty(line.quantidade-(line.cancelada??0)-accepted-awaiting):kind==='itens_entregues'?qty(delivered):qty(accepted);
     const item=contract.itens.find(entry=>entry.id===line.id);
     return amount>0&&item?[{order,item,amount}]:[];
   }));
