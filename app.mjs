@@ -2184,7 +2184,7 @@ function renderDisputes(view) {
 
 function renderProposalBoard(view) {
   const grid = document.createElement('section');
-  grid.style.cssText = 'display:grid;grid-template-columns:repeat(6,minmax(210px,1fr));gap:12px;overflow:auto';
+  grid.className = 'proposal-board';
   const approved = db.editais.filter(row=>row.status==='Aprovado');
   for (const [index,stage] of proposalStages.entries()) {
     const rows = approved.filter(row=>proposalStage(row)===index);
