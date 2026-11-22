@@ -650,8 +650,8 @@ function mountCargoManagement(parent,empresa,mestre=false) {
 
 let teamNames={};
 async function openTeam() {
-  team = await call('licitacoes_equipe',{cliente:group});
-  teamNames=await call('licitacoes_nomes_equipe',{empresa:group});
+  team = groupRole()==='admin' ? await call('licitacoes_equipe',{cliente:group}) : [];
+  teamNames = groupRole()==='admin' ? await call('licitacoes_nomes_equipe',{empresa:group}) : {};
   page = 'equipe'; activeEdital = null; render();
 }
 
@@ -1250,7 +1250,50 @@ function renderMemberProfiles(section,customerId,members,refresh) {
   }
 }
 
+function editOwnAccount() {
+  const user=session.user;
+  edit('Editar minha conta',[
+    ['username','Nome de usuário','text',user.user_metadata?.username],
+    ['email','E-mail da conta','email',user.email]
+  ],async ({username,email})=>{
+    const fields={data:{username:username.trim()}};
+    if(email.trim().toLowerCase()!==user.email.toLowerCase()) fields.email=email.trim();
+    if(!fields.data.username) throw new Error('Informe um nome de usuário.');
+    const {data,error}=await client.auth.updateUser(fields);
+    if(error) throw error;
+    session={...session,user:data.user};
+    return fields.email ? 'Confira sua caixa de entrada para confirmar a alteração do e-mail.' : 'Nome de usuário atualizado.';
+  },{onSaved:result=>{openTeam().then(()=>message(result)).catch(error=>message(error.message));}});
+}
+
+function editOwnPassword() {
+  edit('Alterar senha',[
+    ['password','Nova senha','password'],
+    ['confirmacao','Confirme a nova senha','password']
+  ],async ({password,confirmacao})=>{
+    if(password!==confirmacao) throw new Error('As senhas precisam ser iguais.');
+    if(password.length<8) throw new Error('Use pelo menos oito caracteres.');
+    const {error}=await client.auth.updateUser({password});
+    if(error) throw error;
+  },{decorate:form=>{
+    for(const field of form.querySelectorAll('input[type=password]')) field.autocomplete='new-password';
+  },onSaved:()=>message('Senha atualizada.')});
+}
+
+function renderMyAccount(view) {
+  const user=session.user;
+  const card=panel(view,'<h2>Minha conta</h2><p>'+escape(user.user_metadata?.username||user.email.split('@')[0])+' · '+escape(user.email)+'</p>');
+  if(isDemo() && user.email==='demo@example.com') {
+    card.insertAdjacentHTML('beforeend','<p class="muted">O e-mail e a senha da conta compartilhada de demonstração são fixos.</p>');
+    return;
+  }
+  action('Editar nome e e-mail',editOwnAccount,card);
+  action('Alterar minha senha',()=>editOwnPassword(),card);
+}
+
 function renderTeam(view) {
+  renderMyAccount(view);
+  if(groupRole()!=='admin') return;
   const section=panel(view,'<h2>Integrantes</h2><p class="muted">Vincule contas cadastradas à empresa e defina seus cargos.</p>');
   section.classList.add('settings-section');
   action('Vincular integrante',async ()=>{
@@ -1275,6 +1318,9 @@ function renderTeam(view) {
   for(const member of team) {
     const details=teamNames[member.usuario_id];
     const card=panel(section,'<strong>'+escape(details?.nome||member.email)+'</strong><p>'+escape(member.email)+' · '+escape(details?.cargo||({admin:'Administrador',operador:'Operador',leitor:'Leitor'}[member.papel]))+'</p>');
+    action('Editar nome na empresa',()=>edit('Nome na empresa',[['nome','Nome de exibição','text',details?.nome]],
+      values=>call('licitacoes_renomear_integrante',{empresa:group,integrante:member.usuario_id,nome:values.nome}),
+      {onSaved:()=>openTeam().catch(error=>message(error.message))}),card);
     if(member.papel!=='admin') renderMemberProfiles(card,group,[member],()=>openTeam());
   }
   mountCargoManagement(view,group);
@@ -2561,9 +2607,9 @@ function render() {
     if (!screenAllowed(key) || (key==='configuracoes' && !canOpenCompanySettings())) continue;
     navAction(key,label,()=>goTo(key),nav);
   }
-  if (groupRole() === 'admin') navAction('equipe','Minha equipe',openTeam,nav);
+  if (group) navAction('equipe','Minha equipe',openTeam,nav);
   if (platformView) return;
-  if (page === 'equipe' && groupRole() === 'admin') { renderTeam(view); return; }
+  if (page === 'equipe' && group) { renderTeam(view); return; }
   if (!screenAllowed(page)) {
     const fallback=Object.keys(screens).find(key=>screenAllowed(key) && (key!=='configuracoes' || canOpenCompanySettings()));
     if(fallback) {goTo(fallback);return;}
