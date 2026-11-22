@@ -112,6 +112,7 @@ let screenAppearance=[];
 async function load() {
   screenAppearance=[];
   screenAccess={};
+  currentCompanyProfile=null;
   if (!client) {
     const data = JSON.parse(localStorage.getItem(localKey) || '{}');
     allTables.forEach(table => { db[table] = data[table] ?? []; });
@@ -125,6 +126,7 @@ async function load() {
   const {data:access,error:accessError}=await client.rpc('licitacoes_minhas_telas',{empresa:group});
   if(accessError) throw accessError;
   screenAccess=access??{};
+  currentCompanyProfile=await call('licitacoes_meu_cargo',{empresa:group});
   const responses = await Promise.all(allTables.map(table => client.from(table).select(table === 'editais'
     ? 'id,grupo_id,empresa_id,numero,numero_pregao,orgao,modalidade,sessao,status,parecer,edital_url,local_disputa,edital_pdf_nome,objeto,modo_disputa,etapa_proposta'
     : table==='cotacoes' ? 'id,grupo_id,empresa_id,titulo,fornecedor,email,observacao,etapa,itens,historico,revisao,criado_em,tipo,orgao_id,assinado_em' : '*').eq('grupo_id',group)));
@@ -602,6 +604,8 @@ async function openClients(key='clientes') {
 
 const accessLevels=[['bloqueado','Sem acesso'],['consulta','Somente consulta'],['operacao','Operar']];
 let screenAccess={};
+let currentCompanyProfile=null;
+const profileLabel=(role,cargo)=>cargo||({admin:'Administrador',operador:'Operador',leitor:'Leitor'}[role]??'Usuário');
 const screenAllowed=key=>!client || !Object.hasOwn(screens,key) || screenAccess[key]!=='bloqueado';
 
 
@@ -1204,9 +1208,11 @@ async function openAccessConfiguration(parent,company,byUser) {
   }
   if(!parent.isConnected) return;
   parent.replaceChildren();
+  const names=await call('licitacoes_nomes_equipe',{empresa:company.id});
+  if(!parent.isConnected) return;
   for(const member of settings.usuarios) {
     const card=panel(parent,'<strong>'+escape(member.alias||member.email)+'</strong><p>'+
-      escape(member.email)+' · '+escape(member.papel)+' · '+(member.habilitado?'Habilitado':'Bloqueado')+
+      escape(member.email)+' · '+escape(profileLabel(member.papel,names[member.id]?.cargo))+' · '+(member.habilitado?'Habilitado':'Bloqueado')+
       (member.validade?' · Válido até '+escape(member.validade.split('-').reverse().join('/')):'')+'</p>');
     action('Configurar acesso e alias',()=>edit('Acesso de '+member.email,[
       ['modo','Situação','select',member.habilitado?'ativo':'bloqueado',[['ativo','Ativo'],['bloqueado','Bloqueado']]],
@@ -1241,19 +1247,25 @@ function renderClients(view) {
     },card);
     if(page==='masterAcessos') {
       const members=panel(card,'<h3>Permissões por conta</h3>');
-      action('Consultar integrantes',()=>showMemberProfiles(members,customer.id),card);
       const permissions=panel(card,'<h3>Acesso e aliases</h3>');
-      action('Configurar acesso dos usuários',()=>openAccessConfiguration(permissions,customer,true),card);
+      const refreshMembers=()=>showMemberProfiles(members,customer.id,async ()=>{
+        if(permissions.dataset.loaded) await openAccessConfiguration(permissions,customer,true);
+      });
+      action('Consultar integrantes',refreshMembers,card);
+      action('Configurar acesso dos usuários',async ()=>{
+        await openAccessConfiguration(permissions,customer,true);
+        permissions.dataset.loaded='true';
+      },card);
       mountCargoManagement(card,customer.id,true);
     }
   }
 }
 
-async function showMemberProfiles(section,customerId) {
-  const members=await call('licitacoes_equipe',{cliente:customerId});
+async function showMemberProfiles(section,customerId,afterChange) {
+  const [members,names]=await Promise.all([call('licitacoes_equipe',{cliente:customerId}),call('licitacoes_nomes_equipe',{empresa:customerId})]);
   if(!section.isConnected) return;
   section.replaceChildren();
-  renderMemberProfiles(section,customerId,members,()=>showMemberProfiles(section,customerId).catch(error=>message(error.message)));
+  renderMemberProfiles(section,customerId,members,()=>Promise.all([showMemberProfiles(section,customerId,afterChange),afterChange?.()]).catch(error=>message(error.message)),names);
 }
 
 const registryPermissionResources=[['catalogo','Produtos / Serviços'],['orgaos_compradores','Prefeituras / Clientes']];
@@ -1274,9 +1286,9 @@ async function editRegistryPermissions(customerId,member,refresh) {
   },{onSaved:refresh});
 }
 
-function renderMemberProfiles(section,customerId,members,refresh) {
+function renderMemberProfiles(section,customerId,members,refresh,names={}) {
   for(const member of members) {
-    const card=panel(section,'<strong>'+escape(member.email)+'</strong><p>'+({admin:'Administrador',operador:'Operador',leitor:'Leitor'}[member.papel]??'')+'</p>');
+    const card=panel(section,'<strong>'+escape(member.email)+'</strong><p>'+escape(profileLabel(member.papel,names[member.usuario_id]?.cargo))+'</p>');
     if(!['operador','leitor'].includes(member.papel)) continue;
     action('Permissões de cadastros',()=>editRegistryPermissions(customerId,member,refresh),card);
     action('Alterar perfil',async ()=>{
@@ -1405,7 +1417,7 @@ function renderTeam(view) {
     action('Editar nome na empresa',()=>edit('Nome na empresa',[['nome','Nome de exibição','text',details?.nome]],
       values=>call('licitacoes_renomear_integrante',{empresa:group,integrante:member.usuario_id,nome:values.nome}),
       {onSaved:()=>openTeam().catch(error=>message(error.message))}),card);
-    if(member.papel!=='admin') renderMemberProfiles(card,group,[member],()=>openTeam());
+    if(member.papel!=='admin') renderMemberProfiles(card,group,[member],()=>openTeam(),teamNames);
   }
   mountCargoManagement(view,group);
 }
@@ -2652,7 +2664,7 @@ function render() {
   }
   if (client) {
     const user = customer?.alias || session.user.user_metadata?.username || session.user.email?.split('@')[0] || 'Meu acesso';
-    const profile = master ? 'Mestre Criador' : ({admin:'Administrador',operador:'Operador',leitor:'Leitor'}[groupRole()] || 'Usuário');
+    const profile = master ? 'Mestre Criador' : profileLabel(groupRole(),currentCompanyProfile);
     account.innerHTML = `<span class="avatar" aria-hidden="true">${escape(user.slice(0,2).toUpperCase())}</span><div><strong>${escape(user)}</strong><small>${profile}</small></div>`;
     const signout = action('Sair', async () => {
       const {error} = await client.auth.signOut();
