@@ -165,7 +165,7 @@ async function save(table, values, id) {
 
 const groupRole = () => groups.find(item => item.id === group)?.role;
 const isDemo = () => group==='4df12050-8638-4906-ae91-f0fb199f266d';
-const canOpenCompanySettings = () => !client || groupRole()==='admin' ||
+const canOpenCompanySettings = () => !client || groupRole()==='admin' || screenAccess.configuracoes==='operacao' ||
   (isDemo() && session?.user?.email==='demo@example.com');
 function demoDelete(table,id,parent,onSaved=render) {
   if(!isDemo() || !canWrite()) return;
@@ -184,22 +184,22 @@ const writeAction = (label,run,parent,primary) => { if (canWrite()) action(label
 function companyFields(row = {}) {
   return [
     ['nome','Razão social','text',row.nome],['cnpj','CNPJ completo','text',row.cnpj],
-    ['porte','Enquadramento informado','select','MEI',['MEI','MEI Caminhoneiro','ME','EPP','Demais']]
+    ['porte','Enquadramento informado','select',row.porte??'MEI',['MEI','MEI Caminhoneiro','ME','EPP','Demais']]
   ];
 }
 
-async function saveCompany(values) {
+async function saveCompany(values,id) {
   values.nome = values.nome.trim();
   values.cnpj = normalizeDocument(values.cnpj);
   if (!values.nome) throw new Error('Informe a razão social.');
   if (values.cnpj.length !== 14 || !validDocument(values.cnpj)) throw new Error('Informe um CNPJ válido, incluindo os dois dígitos verificadores.');
-  if (db.empresas.some(row => row.cnpj === values.cnpj)) throw new Error('CNPJ já cadastrado neste grupo.');
-  await save('empresas',values);
+  if (db.empresas.some(row => row.id!==id && row.cnpj === values.cnpj)) throw new Error('CNPJ já cadastrado neste grupo.');
+  await save('empresas',values,id);
   return db.empresas.find(row=>row.cnpj===values.cnpj);
 }
 
-function company() {
-  edit('Cadastrar CNPJ participante',companyFields(),saveCompany);
+function company(record) {
+  edit(record?'Editar empresa participante':'Cadastrar empresa participante',companyFields(record),values=>saveCompany(values,record?.id));
 }
 
 function agencyFields(row = {}) {
@@ -1563,6 +1563,11 @@ const settingsCategories=[
 ];
 let selectedSettings=0;
 
+const canManageParticipants = () => canWrite() || (isDemo() && session?.user?.email==='demo@example.com' &&
+  groupRole()==='operador' && screenAccess.configuracoes==='consulta');
+const participantAction = (label, run, parent, primary) => {
+  if(canManageParticipants()) action(label,run,parent,primary);
+};
 function renderCompanySettings(view) {
   const nav=document.createElement('nav');
   nav.className='settings-nav';
@@ -1581,11 +1586,13 @@ function renderCompanySettings(view) {
     section.classList.add('settings-section');
     if(index===0) {
       section.insertAdjacentHTML('beforeend','<h3>CNPJs participantes</h3><p class="muted">Gerencie os dados e a identidade dos documentos de cada CNPJ.</p>');
-      writeAction('Cadastrar CNPJ',company,section,true);
+      participantAction('Cadastrar empresa participante',()=>company(),section,true);
       if(!db.empresas.length) section.insertAdjacentHTML('beforeend','<p class="muted">Nenhum CNPJ cadastrado.</p>');
       for(const companyRecord of db.empresas) {
         const card=panel(section,'<strong>'+escape(companyRecord.nome)+'</strong><p>'+escape(companyRecord.cnpj)+' · '+escape(companyRecord.porte)+'</p>');
-        writeAction('Logo e dados para propostas',()=>companyProposalSettings(companyRecord),card);
+        participantAction('Editar empresa',()=>company(companyRecord),card);
+        renderCompanyRepresentatives(card,companyRecord);
+        participantAction('Logo e dados para propostas',()=>companyProposalSettings(companyRecord),card);
       }
     }
     if(client && canWrite() && index===1) renderOperationSettings(section);
@@ -1852,7 +1859,7 @@ async function downloadQuote(row,format) {
   }
   const Pdf=await proposalPdfLibrary();
   const pdf=new Pdf({unit:'mm',format:'a4'});
-  let y=18;
+  let y=placeCompanyLogo(company,pdf,18);
   function write(value,size=10,bold=false) {
     pdf.setFont('helvetica',bold?'bold':'normal');
     pdf.setFontSize(size);
@@ -1866,6 +1873,10 @@ async function downloadQuote(row,format) {
   write(row.titulo,12,true);
   write('Referência: '+name);
   write('Solicitante: '+(company?.nome??'')+' · CNPJ '+(company?.cnpj??''));
+  for(const [key,label] of proposalIdentity.slice(0,5)) {
+    const value=company?.dados_proposta?.[key];
+    if(value) write(label+': '+value);
+  }
   write('Fornecedor: '+row.fornecedor);
   if (row.observacao) write(row.observacao);
   for (const item of row.itens) {
@@ -2541,13 +2552,30 @@ function renderOverview(view) {
   select.add(new Option('Todos os anos','todos'));
   select.add(new Option('Sem ano identificado','sem-ano'));
   select.value=yearNow;
+  const filters=panel(view,'<h2>Análise de licitações</h2><div class="line"></div>');
+  const filterLine=filters.querySelector('.line');
+  function analysisFilter(label,options) {
+    const wrapper=document.createElement('label');
+    const choice=document.createElement('select');
+    wrapper.append(label,choice);
+    for(const [value,name] of options) choice.add(new Option(name,value));
+    filterLine.append(wrapper);
+    choice.onchange=draw;
+    return choice;
+  }
+  const empresa=analysisFilter('Empresa participante',[['','Todas'],...db.empresas.map(row=>[row.id,row.nome])]);
+  const modalidade=analysisFilter('Modalidade',[['','Todas'],...modalities.map(name=>[name,name])]);
+  const situacao=analysisFilter('Situação',[['','Todas'],...stages.map(name=>[name,name])]);
+  const dimension=analysisFilter('Agrupar por',[['status','Situação'],['modalidade','Modalidade'],['orgao','Órgão'],['mes','Mês da sessão']]);
+  const measure=analysisFilter('Indicador do gráfico',[['count','Quantidade de editais'],['value','Valor em propostas']]);
   const summary=document.createElement('div');
   view.append(summary);
   function draw() {
     summary.replaceChildren();
     const selected=select.value;
     const inYear=year=>selected==='todos' || (selected==='sem-ano'?!year:year===selected);
-    const editais=db.editais.filter(row=>inYear(yearOf(row)));
+    const editais=db.editais.filter(row=>inYear(yearOf(row))&&(!empresa.value||row.empresa_id===empresa.value)
+      &&(!modalidade.value||row.modalidade===modalidade.value)&&(!situacao.value||row.status===situacao.value));
     const ids=new Set(editais.map(row=>row.id));
     const items=db.itens.filter(item=>ids.has(item.edital_id));
     const count=status=>editais.filter(row=>row.status===status).length;
@@ -2592,6 +2620,28 @@ function renderOverview(view) {
       ['Itens perdidos',itemsLost,'Resultado registrado como Perdemos','propostas']
     ]) grid.insertAdjacentHTML('beforeend','<div class="metric"><div><span>'+label+'</span><span class="metric-icon">'+icon(symbol)+'</span></div><strong>'+escape(value)+'</strong><small>'+detail+'</small></div>');
     summary.append(grid);
+    const chart=panel(summary,'<h2>Distribuição dos resultados</h2>');
+    const values=new Map();
+    for(const row of editais) {
+      const key=(dimension.value==='mes'?row.sessao?.slice(0,7):row[dimension.value])||'Não informado';
+      const amount=measure.value==='count'?1:total(grouped.get(row.id)??[]);
+      values.set(key,(values.get(key)??0)+amount);
+    }
+    if(!values.size) chart.append('Nenhum edital corresponde aos filtros.');
+    else {
+      const data=[...values].sort((a,b)=>b[1]-a[1]);
+      const max=Math.max(1,data[0][1]);
+      const chartTable=quoteTable(chart,['Grupo','Indicador','Valor']);
+      for(const [label,value] of data) {
+        const row=chartTable.insertRow();
+        row.insertCell().textContent=label;
+        const meter=document.createElement('meter');
+        meter.min=0;meter.max=max;meter.value=value;meter.setAttribute('aria-label',label);
+        meter.style.width='100%';
+        row.insertCell().append(meter);
+        row.insertCell().textContent=measure.value==='count'?decimal.format(value):money.format(value);
+      }
+    }
     const section=panel(summary,'<h2>Resumo por tela</h2>');
     const table=quoteTable(section,['Tela','Indicadores','Acesso']);
     const byStage=(rows,names)=>names.map((name,index)=>name+' '+rows.filter(row=>row.etapa===index).length).join(' · ');
@@ -2704,6 +2754,52 @@ function applyScreenAppearance(view) {
 }
 
 let previousScreen;
+
+function mountScreenReport(view) {
+  const controls=byId('page-actions');
+  const title=byId('page-title').textContent;
+  function collect() {
+    const blocks=[...view.querySelectorAll('table')].filter(table=>table.getClientRects().length);
+    const rows=blocks.flatMap(table=>[...table.rows].filter(row=>row.getClientRects().length).map(row=>
+      [...row.cells].filter(cell=>cell.textContent.trim()&&!cell.querySelector('button')).map(cell=>cell.innerText.trim())));
+    if(rows.length) return rows.filter(row=>row.length);
+    return view.innerText.split(String.fromCharCode(10)).map(line=>line.trim()).filter(Boolean).map(line=>[line]);
+  }
+  function requestReport() {
+    edit('Exportar relatório da tela',[
+      ['formato','Formato','select','csv',[['csv','CSV para análise'],['pdf','PDF para consulta']]]
+    ],async ({formato})=>{
+      const rows=collect();
+      if(!rows.length) throw new Error('A tela ainda não tem dados para exportar.');
+      const file='relatorio-'+title.normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/-$/,'');
+      if(formato==='csv') {
+        const safe=cell=>'"'+(/^[\s]*[=+@-]/.test(cell)?"'":'')+cell.replaceAll('"','""')+'"';
+        const csv=rows.map(row=>row.map(safe).join(';')).join(String.fromCharCode(13,10));
+        saveQuoteFile(new Blob([String.fromCharCode(65279),csv],{type:'text/csv;charset=utf-8'}),file+'.csv');
+        return;
+      }
+      const Pdf=await proposalPdfLibrary();
+      const pdf=new Pdf({unit:'mm',format:'a4'});
+      const company=db.empresas.length===1?db.empresas[0]:null;
+      let y=placeCompanyLogo(company,pdf,16);
+      const write=(text,size)=>{
+        pdf.setFontSize(size);
+        for(const line of pdf.splitTextToSize(text,178)) {
+          if(y>278) {pdf.addPage();y=16;}
+          pdf.text(line,16,y);y+=size*.5;
+        }
+      };
+      write(title,16);
+      if(company) write(company.nome+' · CNPJ '+company.cnpj,10);
+      write(new Date().toLocaleDateString('pt-BR'),10);
+      y+=4;
+      for(const row of rows) write(row.join('  |  '),9);
+      pdf.save(file+'.pdf');
+    },{onSaved:()=>{}});
+  }
+  action('Exportar relatório',requestReport,controls);
+}
+
 function render() {
   window.clearInterval(headerClockTimer);
   const currentScreen = [group,page,activeEdital,detailMode,Boolean(session)].join(':');
@@ -2733,6 +2829,7 @@ function render() {
     if (client) byId('connection').textContent = 'Sua empresa em movimento, da captação à entrega.';
     if (canWrite()) action('Nova oportunidade',()=>edital(),byId('page-actions'),true).insertAdjacentHTML('afterbegin',icon('plus'));
   }
+  if ((session||!client)&&(group||platformView||!client)) mountScreenReport(view);
   if (client && !session) {
     const access = document.createElement('div');
     access.className = 'auth-layout';
@@ -2767,7 +2864,7 @@ function render() {
     const signout = action('Sair', async () => {
       const {error} = await client.auth.signOut();
       if (error) throw error;
-      session = null; group = null; master = false; groups = []; clients = []; team = []; page = 'painel'; activeEdital = null; await load(); render();
+      accessNotice?.remove(); session = null; group = null; master = false; groups = []; clients = []; team = []; page = 'painel'; activeEdital = null; await load(); render();
     },account);
     mountNotifications(account);
     mountAccountStatus(account,customer);
@@ -2988,10 +3085,59 @@ async function proposalAttachments(section,row,items) {
 
 const printedDescription = item=>item.usar_descricao_interna ? item.descricao_interna || item.descricao : item.descricao;
 const proposalIdentity = [
-  ['inscricao_estadual','Inscrição estadual'],['endereco','Endereço'],['telefone','Telefone / Fax'],['email','E-mail'],
-  ['banco','Banco'],['agencia','Agência'],['conta','Conta'],['signatario','Nome do signatário'],
-  ['cargo','Cargo'],['nacionalidade','Nacionalidade'],['rg','Identidade'],['cpf','CPF próprio para a proposta']
+  ['inscricao_estadual','Inscrição estadual'],['inscricao_municipal','Inscrição municipal'],
+  ['endereco','Endereço da empresa'],['telefone','Telefone'],['email','E-mail'],
+  ['banco','Banco'],['agencia','Agência'],['conta','Conta']
 ];
+const representativeFields = [
+  ['signatario','Nome do representante legal'],['cargo','Cargo'],['cpf','CPF'],
+  ['rg','RG'],['nacionalidade','Nacionalidade']
+];
+function companyRepresentatives(company) {
+  const identity=company?.dados_proposta??{};
+  if(Array.isArray(identity.representantes)) return identity.representantes;
+  if(!identity.signatario) return [];
+  return [{id:'anterior',...Object.fromEntries(representativeFields.map(([key])=>[key,identity[key]??'']))}];
+}
+function renderCompanyRepresentatives(card,company) {
+  const list=companyRepresentatives(company);
+  function editRepresentative(current) {
+    edit(current?'Editar representante':'Cadastrar representante',
+      representativeFields.map(([key,label])=>[key,label,'text',current?.[key]]),async values=>{
+      const fields=Object.fromEntries(Object.entries(values).map(([key,value])=>[key,value.trim()]));
+      if(!fields.signatario) throw new Error('Informe o nome do representante.');
+      fields.cpf=normalizeDocument(fields.cpf);
+      if(fields.cpf && (!/^\d{11}$/.test(fields.cpf)||!validDocument(fields.cpf))) throw new Error('Informe um CPF válido com 11 dígitos.');
+      if(fields.cpf && list.some(row=>row.id!==current?.id&&normalizeDocument(row.cpf)===fields.cpf)) throw new Error('Esse CPF já está cadastrado para esta empresa.');
+      const representante={...fields,id:current?.id??crypto.randomUUID()};
+      const representantes=current?list.map(row=>row.id===current.id?representante:row):[...list,representante];
+      await save('empresas',{dados_proposta:{...company.dados_proposta,representantes}},company.id);
+    },{decorate:form=>{for(const field of form.querySelectorAll('input')) field.required=field.name==='signatario';}});
+  }
+  const section=panel(card,'<h4>Representantes legais</h4>');
+  participantAction('Cadastrar representante',()=>editRepresentative(),section);
+  for(const person of list) {
+    const row=panel(section,'<p>'+escape(person.signatario+(person.cargo?' · '+person.cargo:''))+'</p>');
+    participantAction('Editar representante',()=>editRepresentative(person),row);
+  }
+}
+function selectDocumentRepresentative(company,generate) {
+  const people=companyRepresentatives(company);
+  if(people.length<2) return generate(people[0]);
+  edit('Selecionar representante para o PDF',[
+    ['representante','Representante legal','select',people[0].id,people.map(person=>[person.id,person.signatario+(person.cargo?' · '+person.cargo:'')])]
+  ],({representante})=>generate(people.find(person=>person.id===representante)),{onSaved:()=>{}});
+}
+function placeCompanyLogo(company,pdf,y) {
+  const identity=company?.dados_proposta??{};
+  if (/^data:image\/(png|jpeg);base64,/.test(identity.logo??'')) {
+    const image=pdf.getImageProperties(identity.logo);
+    const scale=Math.min(55/image.width,22/image.height);
+    pdf.addImage(identity.logo,image.fileType,16,y,image.width*scale,image.height*scale);
+    return y+image.height*scale+5;
+  }
+  return y;
+}
 function companyProposalSettings(company) {
   const current = company.dados_proposta ?? {};
   edit('Dados da empresa para impressão',[
@@ -3035,12 +3181,17 @@ async function proposalPdfLibrary() {
   return pdfLibrary;
 }
 
-async function downloadProposalPdf(row,items,{budget=false,readequada=false}={}) {
+function downloadProposalPdf(row,items,options={}) {
+  const company=db.empresas.find(entry=>entry.id===row.empresa_id);
+  return selectDocumentRepresentative(company,representative=>generateProposalPdf(row,items,options,representative));
+}
+
+async function generateProposalPdf(row,items,{budget=false,readequada=false},representative) {
   const Pdf = await proposalPdfLibrary();
   const pdf = new Pdf({unit:'mm',format:'a4'});
   const company = db.empresas.find(entry=>entry.id===row.empresa_id);
   const identity = company?.dados_proposta ?? {};
-  let y = 16;
+  let y = placeCompanyLogo(company,pdf,16);
   function space(height) {
     if (y+height>277) { pdf.addPage(); y=16; }
   }
@@ -3054,16 +3205,11 @@ async function downloadProposalPdf(row,items,{budget=false,readequada=false}={})
       y+=step;
     }
   }
-  if (/^data:image\/(png|jpeg);base64,/.test(identity.logo??'')) {
-    const image = pdf.getImageProperties(identity.logo);
-    const scale = Math.min(55/image.width,22/image.height);
-    pdf.addImage(identity.logo,image.fileType,16,y,image.width*scale,image.height*scale);
-    y+=image.height*scale+5;
-  }
   write(budget?'ORÇAMENTO COMERCIAL':readequada?'PROPOSTA COMERCIAL READEQUADA':'PROPOSTA COMERCIAL',{size:17,bold:true});
   write('Razão social: '+(company?.nome??''),{bold:true});
   write('CNPJ: '+(company?.cnpj??''));
   for (const [key,label] of proposalIdentity) if (identity[key]) write(label+': '+identity[key]);
+  for (const [key,label] of representativeFields) if (representative?.[key]) write(label+': '+representative[key]);
   y+=3;
   write('À atenção do Setor de Licitações — '+row.orgao);
   write(budget?'Referência da solicitação: '+row.numero:'Processo: '+row.numero+' · '+row.modalidade+' '+(row.numero_pregao??''));
@@ -3089,7 +3235,7 @@ async function downloadProposalPdf(row,items,{budget=false,readequada=false}={})
   y+=16;
   pdf.line(16,y,103,y);
   y+=5;
-  write(identity.signatario || company?.nome || 'Representante da empresa participante',{bold:true});
+  write(representative?.signatario || company?.nome || 'Representante da empresa participante',{bold:true});
   if (identity.cargo) write(identity.cargo);
   write('Assinatura do representante');
   for (let page=1;page<=pdf.getNumberOfPages();page++) {
@@ -3317,6 +3463,48 @@ versionBanner.querySelector('button').onclick = () => {
 };
 window.addEventListener('focus',checkVersion);
 window.setInterval(checkVersion,60000);
+
+let checkingAccess=false;
+let accessNotice;
+const accessSignature=(rules,profile)=>JSON.stringify([profile??null,Object.keys(screens).map(key=>rules?.[key]??null)]);
+async function checkSessionAccess() {
+  if(!client||!session?.user||!group||master||checkingAccess||document.hidden) return;
+  const currentGroup=group;
+  const user=session.user.id;
+  checkingAccess=true;
+  try {
+    const [rules,profile]=await Promise.all([
+      call('licitacoes_minhas_telas',{empresa:currentGroup}),
+      call('licitacoes_meu_cargo',{empresa:currentGroup})
+    ]);
+    if(group!==currentGroup||session?.user?.id!==user) return;
+    if(accessSignature(rules,profile)===accessSignature(screenAccess,currentCompanyProfile)) {
+      accessNotice?.remove();
+      return;
+    }
+    if(accessNotice?.isConnected) return;
+    accessNotice=document.createElement('section');
+    accessNotice.className='line';
+    accessNotice.setAttribute('role','status');
+    accessNotice.append('Seu perfil ou suas permissões foram alterados.');
+    const button=action('Atualizar meu acesso',async ()=>{
+      if(document.querySelector('dialog[open]')) {message('Feche o formulário aberto antes de atualizar o acesso.');return;}
+      button.disabled=true;
+      try {
+        await loadGroups();
+        if(groups.some(item=>item.id===currentGroup) && group!==currentGroup) {group=currentGroup;await load();}
+        accessNotice.remove();
+        render();
+      } finally {button.disabled=false;}
+    },accessNotice,true);
+    versionBanner.after(accessNotice);
+  } catch {
+    // A falha temporária será tratada na próxima verificação.
+  } finally {checkingAccess=false;}
+}
+window.addEventListener('focus',checkSessionAccess);
+window.setInterval(checkSessionAccess,15000);
+
 void checkVersion();
 
 try {
