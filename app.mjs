@@ -1,3 +1,4 @@
+import {contractAlerts, logisticsWorkspace} from './logistica.mjs';
 import {normalizeDocument, validDocument} from './documentos.mjs';
 import {makeZip} from './pacote.mjs';
 import {supabaseUrl, supabasePublishableKey} from './config.mjs';
@@ -29,7 +30,6 @@ const pendingScreens = {
   disputa:'Acompanhamento de lances e simulação de preços pela margem.',
   acompanhamento:'Negociação após a disputa, emissão de proposta readequada e acompanhamento até a assinatura.',
   finalizados:'Arquivo de ARP, ata da sessão, contratos e documentos do processo.',
-  logistica:'Solicitações do órgão, saldo por item e alertas de 30%, 10% e 5%.',
   financeiro:'Análise de custos e solicitação de reajuste ou revisão de preços.',
   aplicativo:'Instalação e acesso ao aplicativo.'
 };
@@ -595,7 +595,7 @@ let masterNavigationRequest=0;
 async function openClients(key='clientes') {
   const request=++masterNavigationRequest;
   if (['clientes','masterAssinaturas','masterFinanceiro'].includes(key)) await loadCommercialRecords();
-  if (['clientes','masterEmpresas','masterAcessos','masterAparencia','masterAssinaturas','masterFinanceiro','masterSuporte'].includes(key)) clients = await call('licitacoes_clientes');
+  if (['clientes','masterEmpresas','masterAcessos','masterAparencia','masterAssinaturas','masterFinanceiro','masterSuporte','masterLogistica'].includes(key)) clients = await call('licitacoes_clientes');
   if(key==='clientes') {
     const {count,error}=await client.from('chamados_clientes').select('id',{count:'exact',head:true}).neq('situacao','Resolvido');
     if(error) throw error;
@@ -848,6 +848,7 @@ function renderCommercialDashboard(view,selectedType) {
     ['A receber',money.format(pending.reduce((sum,entry) => sum + Number(entry.valor),0))],
     ['Chamados pendentes',openTicketCount]
   ]) panel(indicators,'<strong>'+title+'</strong><p>'+value+'</p>');
+  action('Abrir contratos e logística',()=>openMasterPage('masterLogistica'),summary,true);
   return;
   }
   for (const [type,[title,label]] of Object.entries(commercialSections)) {
@@ -872,6 +873,7 @@ const masterPages = {
   masterAcessos:'Usuários e permissões',
   masterAssinaturas:'Assinaturas',
   masterFinanceiro:'Financeiro comercial',
+  masterLogistica:'Contratos e Logística',
   masterComercial:'Solicitações comerciais',
   masterSuporte:'Chamados de clientes',
   masterAparencia:'Aparência por tela',
@@ -983,12 +985,23 @@ function mountNotifications(account) {
         tickets=tickets.eq('grupo_id',scope).eq('situacao','Resolvido').not('atualizado_em','is',null);
         messages=messages.eq('chamados_clientes.grupo_id',scope);
       }
-      const [ticketResult,messageResult]=await Promise.all([
+      let contracts=client.from('contratos_logistica').select('id,versao,dados,atualizado_em').order('atualizado_em',{ascending:false}).limit(100);
+      if(!global) contracts=contracts.eq('grupo_id',scope);
+      const [ticketResult,messageResult,contractResult]=await Promise.all([
         tickets.order(global?'criado_em':'atualizado_em',{ascending:false}).limit(50),
-        messages.order('enviada_em',{ascending:false}).limit(50)
+        messages.order('enviada_em',{ascending:false}).limit(50),contracts
       ]);
       if(ticketResult.error || messageResult.error) throw ticketResult.error || messageResult.error;
+      const logistics=(contractResult.data??[]).flatMap(row=>{
+        const alerts=contractAlerts(row.dados);
+        if(!alerts.length) return [];
+        const signature=alerts.map(alert=>alert.text).join('|');
+        let hash=0;
+        for(const char of signature) hash=(Math.imul(hash,31)+char.charCodeAt(0))>>>0;
+        return [{key:'logistica:'+row.id+':'+row.versao+':'+hash.toString(16),contract:row.id,title:'Pendências de contrato',subject:row.dados.numero+' · '+row.dados.orgao+' · '+alerts[0].text,date:row.atualizado_em}];
+      });
       const incoming=[
+        ...logistics,
         ...ticketResult.data.map(ticket=>({key:(global?'chamado:':'solucao:')+ticket.id,ticket:ticket.id,title:global?'Novo chamado':'Chamado resolvido',subject:ticket.assunto,date:global?ticket.criado_em:ticket.atualizado_em})),
         ...messageResult.data.map(entry=>({key:'mensagem:'+entry.id,ticket:entry.chamados_clientes.id,title:global?'Mensagem da empresa':'Mensagem do suporte',subject:entry.chamados_clientes.assunto,date:entry.enviada_em}))
       ].sort((a,b)=>b.date.localeCompare(a.date)).slice(0,50);
@@ -1030,8 +1043,14 @@ function mountNotifications(account) {
     for(const event of events) {
       const button=action('',async ()=>{
         await mark([event]);
-        notificationTicket=event.ticket;
         area.open=false;
+        if(event.contract) {
+          logisticsContract=event.contract;
+          if(global) await openMasterPage('masterLogistica');
+          else goTo('logistica');
+          return;
+        }
+        notificationTicket=event.ticket;
         if(global) await openMasterPage('masterSuporte');
         else goTo('ajuda');
       },list);
@@ -1198,6 +1217,7 @@ function renderCustomerTickets(view, attending=false) {
 }
 
 function renderMasterPage(view) {
+  if(page==='masterLogistica') { renderLogistics(view,true); return; }
   if(page==='masterSuporte') { renderCustomerTickets(view,true); return; }
   const commercial = {masterAssinaturas:'assinatura',masterFinanceiro:'cobranca'};
   if (page==='clientes' || commercial[page]) {
@@ -2330,6 +2350,22 @@ async function loadFollowFiles(section,record) {
   }
 }
 
+let logisticsContract;
+function renderLogistics(view,consolidated) {
+  const processes=consolidated?[]:db.editais.filter(row=>getFollow(row)?.finalizado_em).map(row=>{
+    const follow=getFollow(row);
+    const dispute=db.disputas.find(entry=>entry.edital_id===row.id&&entry.etapa===2);
+    const itens=dispute?followResults(row,follow,dispute).filter(({item,result})=>result.situacao==='Ganhamos'&&Number(item.quantidade)>0&&Number(result.preco_final)>0).map(({item,result})=>({
+      id:item.id,nome:[item.codigo,printedDescription(item),item.unidade].filter(Boolean).join(' · '),quantidade:Number(item.quantidade),preco:Number(result.preco_final)
+    })):[];
+    return {id:row.id,label:row.numero+' · '+row.orgao,orgao:row.orgao,itens};
+  });
+  const initialContract=logisticsContract;
+  logisticsContract=null;
+  logisticsWorkspace(view,{client,group,master:consolidated,clients,canWrite:canWrite(),initialContract,
+    panel,action,edit,escape,table:quoteTable,notice:message,processes});
+}
+
 function renderFollow(view) {
   if(!client || unavailableRegistries.has('acompanhamentos')) {
     panel(view,'<p>O acompanhamento depende do banco de dados conectado.</p>');
@@ -2450,6 +2486,7 @@ const iconPaths = {
   masterEmpresas:'M3 21V3h12v18m0-11h6v11M1 21h22M7 7h4m-4 4h4m-4 4h4',
   masterAcessos:'M3 21v-2a4 4 0 014-4h4a4 4 0 014 4v2M9 12a4 4 0 100-8 4 4 0 000 8zm9 0l2 2 3-4',
   masterAssinaturas:'M5 3h14v18H5z M8 8h8m-8 4h8m-8 5h4',
+  masterLogistica:'M2 6h12v11H2z M14 10h4l4 4v3h-8',
   masterFinanceiro:'M3 5h17v15H3z M3 8h17m-6 4h7v5h-7z',
   masterComercial:'M3 4h18v15H3z M3 6l9 7 9-7',
   masterSuporte:'M4 13v-2a8 8 0 0116 0v2M4 12H2v6h4v-6zm16 0h2v6h-4v-6zm0 6v2h-6',
@@ -2779,6 +2816,7 @@ function render() {
     return;
   }
   if (activeEdital) { renderProposal(view,db.editais.find(x => x.id === activeEdital)); return; }
+  if(page==='logistica') { renderLogistics(view,false); return; }
   if (page === 'acompanhamento' || page === 'finalizados') { renderFollow(view); return; }
   if (page === 'disputa') { renderDisputes(view); return; }
   if (page === 'cotacoes' || page === 'orcamento') { renderQuotes(view); return; }
