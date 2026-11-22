@@ -1279,11 +1279,28 @@ function renderMemberProfiles(section,customerId,members,refresh) {
     const card=panel(section,'<strong>'+escape(member.email)+'</strong><p>'+({admin:'Administrador',operador:'Operador',leitor:'Leitor'}[member.papel]??'')+'</p>');
     if(!['operador','leitor'].includes(member.papel)) continue;
     action('Permissões de cadastros',()=>editRegistryPermissions(customerId,member,refresh),card);
-    action('Alterar perfil',()=>edit('Permissões da conta '+member.email,[
-      ['novo_perfil','Perfil','select',member.papel,[['operador','Operador'],['leitor','Leitor']]]
-    ],async values=>{
-      await call('licitacoes_alterar_perfil',{cliente:customerId,integrante:member.usuario_id,...values});
-    },{onSaved:refresh}),card);
+    action('Alterar perfil',async ()=>{
+      const state=await call('licitacoes_painel_cargos',{empresa:customerId});
+      const current=state.integrantes.find(row=>row.id===member.usuario_id);
+      if(!current) throw new Error('Integrante não encontrado.');
+      const presets=Object.keys(accessPresets).filter(nome=>!state.cargos.some(cargo=>cargo.nome===nome));
+      const options=[['base:operador','Operador · acesso básico'],['base:leitor','Leitor · somente consulta'],
+        ...state.cargos.map(cargo=>[cargo.id,cargo.nome]),...presets.map(nome=>['modelo:'+nome,nome])];
+      edit('Permissões da conta '+member.email,[
+        ['perfil','Perfil','select',current.cargo_id??'base:'+member.papel,options]
+      ],async ({perfil})=>{
+        let cargo=perfil;
+        if(perfil.startsWith('modelo:')) {
+          const nome=perfil.slice(7);
+          await call('licitacoes_gravar_cargo',{empresa:customerId,nome_cargo:nome,regras_cargo:presetScreenRules(accessPresets[nome])});
+          const updated=await call('licitacoes_painel_cargos',{empresa:customerId});
+          cargo=updated.cargos.find(row=>row.nome===nome).id;
+        }
+        const base=perfil.startsWith('base:')?perfil.slice(5):'operador';
+        if(base!==current.papel) await call('licitacoes_alterar_perfil',{cliente:customerId,integrante:member.usuario_id,novo_perfil:base});
+        await call('licitacoes_atribuir_cargo',{empresa:customerId,integrante:member.usuario_id,cargo:perfil.startsWith('base:')?null:cargo});
+      },{onSaved:refresh});
+    },card);
   }
 }
 
@@ -1328,8 +1345,38 @@ function renderMyAccount(view) {
   action('Alterar minha senha',()=>editOwnPassword(),card);
 }
 
+function renderDemoTeam(view) {
+  const key='licitacoes-equipe-simulada-demo';
+  let members;
+  try { members=JSON.parse(localStorage.getItem(key)??'[]'); }
+  catch { members=[]; }
+  const section=panel(view,'<h2>Equipe de demonstração</h2><p class="muted">Crie integrantes fictícios para testar os perfis. Os registros ficam neste navegador e não geram acesso ao sistema.</p>');
+  const profiles=Object.keys(accessPresets);
+  function editMember(member) {
+    edit(member?'Editar integrante fictício':'Criar integrante fictício',[
+      ['nome','Nome fictício','text',member?.nome],
+      ['perfil','Perfil','select',member?.perfil??profiles[0],profiles]
+    ],({nome,perfil})=>{
+      nome=nome.trim();
+      if(!nome) throw new Error('Informe um nome fictício.');
+      if(member) members=members.map(row=>row.id===member.id?{...row,nome,perfil}:row);
+      else members.push({id:crypto.randomUUID(),nome,perfil});
+      localStorage.setItem(key,JSON.stringify(members));
+    });
+  }
+  action('Criar integrante fictício',()=>editMember(),section,true);
+  for(const member of members) {
+    const row=panel(section,'<strong>'+escape(member.nome)+'</strong><p>'+escape(member.perfil)+'</p>');
+    action('Editar integrante',()=>editMember(member),row);
+    action('Remover integrante',()=>edit('Remover '+member.nome+' da equipe de demonstração',[],()=>{
+      localStorage.setItem(key,JSON.stringify(members.filter(entry=>entry.id!==member.id)));
+    }),row);
+  }
+}
+
 function renderTeam(view) {
   renderMyAccount(view);
+  if(isDemo() && session.user.email==='demo@example.com') { renderDemoTeam(view); return; }
   if(groupRole()!=='admin') return;
   const section=panel(view,'<h2>Integrantes</h2><p class="muted">Vincule contas cadastradas à empresa e defina seus cargos.</p>');
   section.classList.add('settings-section');
