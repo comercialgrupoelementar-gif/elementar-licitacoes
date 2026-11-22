@@ -163,6 +163,8 @@ async function save(table, values, id) {
 
 const groupRole = () => groups.find(item => item.id === group)?.role;
 const isDemo = () => group==='4df12050-8638-4906-ae91-f0fb199f266d';
+const canOpenCompanySettings = () => !client || groupRole()==='admin' ||
+  (isDemo() && session?.user?.email==='demo@example.com');
 function demoDelete(table,id,parent,onSaved=render) {
   if(!isDemo() || !canWrite()) return;
   action('Excluir',()=>edit('Excluir registro de demonstração',[],async()=>{
@@ -2265,7 +2267,7 @@ function icon(name) {
   return `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${iconPaths[name]}"/></svg>`;
 }
 function goTo(key) {
-  if (!screenAllowed(key) || (key==='configuracoes' && client && (isDemo() || groupRole()!=='admin'))) return;
+  if (!screenAllowed(key) || (key==='configuracoes' && !canOpenCompanySettings())) return;
   page = key;
   activeEdital = null;
   message('');
@@ -2556,14 +2558,14 @@ function render() {
     nav.append(select);
   }
   for (const [key,label] of Object.entries(screens)) {
-    if (!screenAllowed(key) || (key==='configuracoes' && client && (isDemo() || groupRole()!=='admin'))) continue;
+    if (!screenAllowed(key) || (key==='configuracoes' && !canOpenCompanySettings())) continue;
     navAction(key,label,()=>goTo(key),nav);
   }
   if (groupRole() === 'admin') navAction('equipe','Minha equipe',openTeam,nav);
   if (platformView) return;
   if (page === 'equipe' && groupRole() === 'admin') { renderTeam(view); return; }
   if (!screenAllowed(page)) {
-    const fallback=Object.keys(screens).find(key=>screenAllowed(key) && (key!=='configuracoes' || groupRole()==='admin'));
+    const fallback=Object.keys(screens).find(key=>screenAllowed(key) && (key!=='configuracoes' || canOpenCompanySettings()));
     if(fallback) {goTo(fallback);return;}
     panel(view,'<p>Seu perfil está sem módulos habilitados. Consulte o administrador da empresa.</p>');
     return;
@@ -2591,7 +2593,7 @@ function render() {
   if (page === 'painel') {
     renderOverview(view);
   } else if (page === 'configuracoes') {
-    if(!client || groupRole()==='admin') renderCompanySettings(view);
+    if(canOpenCompanySettings()) renderCompanySettings(view);
   } else {
     writeAction('Nova oportunidade',()=>edital(),view,true);
     const grid = document.createElement('div');
