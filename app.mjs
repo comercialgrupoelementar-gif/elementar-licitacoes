@@ -832,24 +832,75 @@ function editCommercialRecord(type, record = {}) {
   });
 }
 
+
+function renderPlatformOverview(view,today,money) {
+  const header=panel(view,'<h2>Gestão da plataforma</h2><div class="line"></div>');
+  const controls=header.querySelector('.line');
+  function filter(label,options) {
+    const wrapper=document.createElement('label');
+    const select=document.createElement('select');
+    wrapper.append(label,select);
+    for(const [value,text] of options) select.add(new Option(text,value));
+    select.onchange=draw;
+    controls.append(wrapper);
+    return select;
+  }
+  const company=filter('Empresa',[['','Todas as empresas'],...clients.map(row=>[row.id,row.nome])]);
+  const period=filter('Vencimento das cobranças',[['','Todos os períodos'],['month','Mês atual'],['year','Ano atual']]);
+  const results=document.createElement('div');
+  view.append(results);
+  function draw() {
+    results.replaceChildren();
+    const filteredClients=clients.filter(row=>!company.value||row.id===company.value);
+    const scoped=commercialRecords.filter(row=>!company.value||row.grupo_id===company.value);
+    const subscriptions=scoped.filter(row=>row.tipo==='assinatura');
+    const charges=scoped.filter(row=>row.tipo==='cobranca'&&(!period.value||
+      row.prazo?.startsWith(today.slice(0,period.value==='month'?7:4))));
+    const pending=charges.filter(row=>row.situacao==='Pendente');
+    const overdue=pending.filter(row=>row.prazo&&row.prazo<today);
+    const received=charges.filter(row=>row.situacao==='Recebida');
+    const sum=rows=>rows.reduce((value,row)=>value+Number(row.valor||0),0);
+    const grid=panel(results,'<h3>Indicadores da plataforma</h3>');
+    const cards=document.createElement('div');cards.className='grid overview-metrics';grid.append(cards);
+    function metric(title,value,route) {
+      const card=panel(cards,'<strong>'+escape(title)+'</strong><p>'+escape(value)+'</p>');
+      action('Ver '+title.toLowerCase(),()=>openMasterPage(route),card);
+      return card.querySelector('p');
+    }
+    metric('Empresas clientes',filteredClients.length,'masterEmpresas');
+    metric('Assinaturas ativas',subscriptions.filter(row=>row.situacao==='Ativa').length,'masterAssinaturas');
+    metric('Cobranças vencidas',overdue.length,'masterFinanceiro');
+    metric('A receber',money.format(sum(pending)),'masterFinanceiro');
+    metric('Recebido',money.format(sum(received)),'masterFinanceiro');
+    const ticketValue=metric('Chamados pendentes',company.value?'Carregando…':openTicketCount,'masterSuporte');
+    if(company.value) client.from('chamados_clientes').select('id',{count:'exact',head:true})
+      .eq('grupo_id',company.value).neq('situacao','Resolvido').then(({count,error})=>{
+        if(ticketValue.isConnected) ticketValue.textContent=error?'Indisponível':count??0;
+      });
+    function chart(title,rows,format) {
+      const section=panel(results,'<h3>'+escape(title)+'</h3>');
+      const table=quoteTable(section,['Situação','Indicador','Total']);
+      const max=Math.max(1,...rows.map(([,value])=>value));
+      for(const [label,value] of rows) {
+        const row=table.insertRow();
+        row.insertCell().textContent=label;
+        const meter=document.createElement('meter');
+        meter.max=max;meter.value=value;meter.style.width='100%';meter.setAttribute('aria-label',label);
+        row.insertCell().append(meter);row.insertCell().textContent=format(value);
+      }
+    }
+    chart('Assinaturas por situação',commercialSections.assinatura[2].map(status=>[status,subscriptions.filter(row=>row.situacao===status).length]),String);
+    chart('Valores das cobranças por situação',[
+      ['A receber no prazo',sum(pending.filter(row=>!overdue.includes(row)))],['Vencidas',sum(overdue)],['Recebidas',sum(received)]
+    ],value=>money.format(value));
+  }
+  draw();
+}
+
 function renderCommercialDashboard(view,selectedType) {
   const today = new Intl.DateTimeFormat('sv-SE',{timeZone:'America/Sao_Paulo'}).format(new Date());
   const money = new Intl.NumberFormat('pt-BR',{style:'currency',currency:'BRL',minimumFractionDigits:4});
-  const pending = commercialRecords.filter(entry => entry.tipo === 'cobranca' && entry.situacao === 'Pendente');
-  if (!selectedType) {
-  const summary = panel(view,'<h2>Operação da plataforma</h2>');
-  const indicators = document.createElement('div');
-  indicators.className = 'line';
-  summary.append(indicators);
-  for (const [title,value] of [
-    ['Empresas',clients.length],
-    ['Assinaturas ativas',commercialRecords.filter(entry => entry.tipo === 'assinatura' && entry.situacao === 'Ativa').length],
-    ['Cobranças vencidas',pending.filter(entry => entry.prazo < today).length],
-    ['A receber',money.format(pending.reduce((sum,entry) => sum + Number(entry.valor),0))],
-    ['Chamados pendentes',openTicketCount]
-  ]) panel(indicators,'<strong>'+title+'</strong><p>'+value+'</p>');
-  return;
-  }
+  if (!selectedType) { renderPlatformOverview(view,today,money); return; }
   for (const [type,[title,label]] of Object.entries(commercialSections)) {
     if (type!==selectedType) continue;
     const section = panel(view,'<h2>'+title+'</h2>');
@@ -2833,7 +2884,7 @@ function render() {
   if (client && !session) {
     const access = document.createElement('div');
     access.className = 'auth-layout';
-    access.innerHTML = '<section class="auth-intro"><a href="./site.html" style="color:inherit">Site da E-Lementar</a><br><strong>E-Lementar Licitações</strong><h2>Da oportunidade à entrega.</h2><p>Organize editais, propostas e fornecimentos ao poder público.</p></section><section class="auth-access"><h2>Acesse sua empresa</h2><form id="login-form"><label>E-mail<input name="email" type="email" autocomplete="username" required></label><label>Senha<input name="password" type="password" autocomplete="current-password" required></label><button type="submit" class="primary">Entrar</button><p role="alert"></p></form></section>';
+    access.innerHTML = '<section class="auth-intro"><a class="auth-brand" href="./site.html" aria-label="Site da E-Lementar Licitações"><img src="./logo-elementar.png" alt="E-Lementar" width="1254" height="1254"><strong>Licitações</strong></a><h2>Da oportunidade à entrega.</h2><p>Organize editais, propostas e fornecimentos ao poder público.</p></section><section class="auth-access"><h2>Acesse sua empresa</h2><form id="login-form"><label>E-mail<input name="email" type="email" autocomplete="username" required></label><label>Senha<input name="password" type="password" autocomplete="current-password" required></label><button type="submit" class="primary">Entrar</button><p role="alert"></p></form></section>';
     view.append(access);
     const form = byId('login-form');
     form.onsubmit = async event => {
