@@ -43,13 +43,20 @@ let master = false;
 let clients = [];
 let team = [];
 let detailMode = null;
+let pendingActions = 0;
+let workspaceRevision = 0;
 
 function action(label, run, parent, primary = false) {
   const button = document.createElement('button');
   button.type = 'button';
   button.textContent = label;
   if (primary) button.className = 'primary';
-  button.onclick = () => Promise.resolve().then(run).catch(error => message(error.message));
+  button.onclick = async () => {
+    pendingActions++;
+    try { await run(); }
+    catch (error) { message(error.message); }
+    finally { pendingActions--; }
+  };
   parent.append(button);
   return button;
 }
@@ -109,8 +116,15 @@ function edit(title, fields, save, options = {}) {
   dialog.showModal();
 }
 
+function workspaceQuery(table,company) {
+  return client.from(table).select(table === 'editais'
+    ? 'id,grupo_id,empresa_id,numero,numero_pregao,orgao,modalidade,sessao,status,parecer,edital_url,local_disputa,edital_pdf_nome,objeto,modo_disputa,etapa_proposta'
+    : table==='cotacoes' ? 'id,grupo_id,empresa_id,titulo,fornecedor,email,observacao,etapa,itens,historico,revisao,criado_em,tipo,orgao_id,assinado_em' : '*').eq('grupo_id',company);
+}
+
 let screenAppearance=[];
 async function load() {
+  workspaceRevision++;
   screenAppearance=[];
   screenAccess={};
   currentCompanyProfile=null;
@@ -128,9 +142,7 @@ async function load() {
   if(accessError) throw accessError;
   screenAccess=access??{};
   currentCompanyProfile=await call('licitacoes_meu_cargo',{empresa:group});
-  const responses = await Promise.all(allTables.map(table => client.from(table).select(table === 'editais'
-    ? 'id,grupo_id,empresa_id,numero,numero_pregao,orgao,modalidade,sessao,status,parecer,edital_url,local_disputa,edital_pdf_nome,objeto,modo_disputa,etapa_proposta'
-    : table==='cotacoes' ? 'id,grupo_id,empresa_id,titulo,fornecedor,email,observacao,etapa,itens,historico,revisao,criado_em,tipo,orgao_id,assinado_em' : '*').eq('grupo_id',group)));
+  const responses = await Promise.all(allTables.map(table => workspaceQuery(table,group)));
   const visual=await client.from('aparencia_telas').select('tela,ajustes').eq('grupo_id',group);
   if(visual.error && !['PGRST205','42P01'].includes(visual.error.code)) throw visual.error;
   screenAppearance=visual.data??[];
@@ -144,6 +156,7 @@ async function load() {
   unavailableRegistries.clear();
   missing.forEach(table => unavailableRegistries.add(table));
   responses.forEach(({data},i) => { db[allTables[i]] = data ?? []; });
+  workspaceRevision++;
 }
 
 async function save(table, values, id) {
@@ -2953,6 +2966,8 @@ function mountScreenReport(view) {
 }
 
 function render() {
+  workspaceRevision++;
+  if (activeEdital && !db.editais.some(row=>row.id===activeEdital)) activeEdital=null;
   window.clearInterval(headerClockTimer);
   const currentScreen = [group,page,activeEdital,detailMode,Boolean(session)].join(':');
   if (previousScreen !== currentScreen) {
@@ -3666,6 +3681,67 @@ async function checkSessionAccess() {
 }
 window.addEventListener('focus',checkSessionAccess);
 window.setInterval(checkSessionAccess,15000);
+
+const workspaceSyncTables = {
+  painel:['empresas','editais','itens','disputas','acompanhamentos'],
+  editais:['empresas','editais','orgaos_compradores'],
+  propostas:['empresas','editais','itens'],
+  propostaPronta:['empresas','editais','itens'],
+  disputa:['empresas','editais','itens','disputas'],
+  acompanhamento:['empresas','editais','itens','disputas','acompanhamentos'],
+  finalizados:['empresas','editais','itens','disputas','acompanhamentos'],
+  orgaos:['orgaos_compradores'],
+  catalogo:['catalogo'],
+  cotacoes:['empresas','catalogo','cotacoes'],
+  orcamento:['empresas','orgaos_compradores','cotacoes'],
+  financeiro:['catalogo','cotacoes']
+};
+let syncingWorkspace = false;
+let draggingWorkspace = false;
+
+byId('view').addEventListener('dragstart',()=>{draggingWorkspace=true;});
+document.addEventListener('dragend',()=>{draggingWorkspace=false;});
+document.addEventListener('drop',()=>{draggingWorkspace=false;});
+
+function workspaceViewIsIdle() {
+  const focused = document.activeElement;
+  return !document.hidden && !pendingActions && !draggingWorkspace
+    && !document.querySelector('dialog[open]')
+    && !(byId('view').contains(focused) && focused.matches('input,select,textarea,[contenteditable]'));
+}
+
+function workspaceRowsChanged(previous,next) {
+  if (previous.length!==next.length) return true;
+  const previousById = new Map(previous.map(row=>[row.id,JSON.stringify(row)]));
+  return next.some(row=>previousById.get(row.id)!==JSON.stringify(row));
+}
+
+async function refreshWorkspace() {
+  const tables = activeEdital ? workspaceSyncTables.propostas : workspaceSyncTables[page];
+  if (!client || !session?.user || !group || !tables || syncingWorkspace || !workspaceViewIsIdle()) return;
+  const company=group;
+  const user=session.user.id;
+  const revision=workspaceRevision;
+  syncingWorkspace=true;
+  try {
+    const results=await Promise.all(tables.map(table=>workspaceQuery(table,company)));
+    if (group!==company || session?.user?.id!==user || revision!==workspaceRevision || !workspaceViewIsIdle()) return;
+    const changes=results.flatMap(({data,error},index)=>{
+      const table=tables[index];
+      return !error && Array.isArray(data) && workspaceRowsChanged(db[table],data) ? [[table,data]] : [];
+    });
+    if (!changes.length) return;
+    for (const [table,rows] of changes) db[table]=rows;
+    render();
+  } catch {
+    // Uma falha de rede será retomada no próximo ciclo.
+  } finally {
+    syncingWorkspace=false;
+  }
+}
+window.addEventListener('focus',refreshWorkspace);
+document.addEventListener('visibilitychange',refreshWorkspace);
+window.setInterval(refreshWorkspace,10000);
 
 void checkVersion();
 
