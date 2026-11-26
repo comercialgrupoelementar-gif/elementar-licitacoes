@@ -3622,11 +3622,19 @@ let checkingAccess=false;
 let accessNotice;
 const accessSignature=(rules,profile)=>JSON.stringify([profile??null,Object.keys(screens).map(key=>rules?.[key]??null)]);
 async function checkSessionAccess() {
-  if(!client||!session?.user||!group||master||checkingAccess||document.hidden) return;
+  if(!client||!session?.user||master||checkingAccess||document.hidden) return;
   const currentGroup=group;
   const user=session.user.id;
   checkingAccess=true;
   try {
+    if(!currentGroup) {
+      await loadGroups();
+      if(group && session?.user?.id===user) {
+        accessNotice?.remove();
+        render();
+      }
+      return;
+    }
     const [rules,profile]=await Promise.all([
       call('licitacoes_minhas_telas',{empresa:currentGroup}),
       call('licitacoes_meu_cargo',{empresa:currentGroup})
